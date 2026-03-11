@@ -1,0 +1,20 @@
+[package]
+name = "prus"
+version = "0.1.0"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "prus"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28.2", features = ["extension-module"] }
+pyo3-arrow = "0.16.0"
+arrow = { version = "57.3.0"}
+arrow-array = "57.3.0"
+ureq = { version = "3.2", features = ["json", "gzip", "charset"] }
+serde = { version = "1.0.194", features = ["derive"] }
+serde_json = "1.0.138"
+base64 = "0.22"
+chrono = "0.4.39"
