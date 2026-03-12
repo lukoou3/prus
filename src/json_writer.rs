@@ -128,7 +128,10 @@ pub(crate) fn serialize_record_batches_json_bytes(
 }
 
 fn writer_builder(datetime_format: Option<&str>) -> WriterBuilder {
-    let builder = WriterBuilder::new().with_timestamp_format(datetime_format.unwrap_or("%Y-%m-%d %H:%M:%S").to_string());
+    let format = datetime_format.unwrap_or("%Y-%m-%d %H:%M:%S").to_string();
+    let builder = WriterBuilder::new()
+        .with_timestamp_format(format.clone())
+        .with_timestamp_tz_format(format);
     builder
 }
 

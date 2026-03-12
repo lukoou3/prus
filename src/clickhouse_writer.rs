@@ -5,7 +5,8 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyModule};
 use pyo3::wrap_pyfunction;
-
+use ureq::Agent;
+use ureq::config::Config;
 use crate::json_writer::{extract_record_batches, serialize_record_batches_json_bytes};
 
 #[pyfunction]
@@ -57,19 +58,25 @@ fn execute_insert(
         base64::engine::general_purpose::STANDARD.encode(credentials)
     );
 
-    let response = ureq::post(&url)
+    let agent = Agent::new_with_config(Config::builder().http_status_as_error(false).build());
+    let response = agent.post(&url)
         .query("query", query)
         .header("Authorization", &authorization)
         .header("X-ClickHouse-Database", database)
         .header("Content-Type", "application/x-ndjson")
         .send(body)
         .map_err(|err| PyRuntimeError::new_err(format!("ClickHouse HTTP insert failed: {err}")))?;
-
+    let status = response.status().as_u16();
     let mut reader = response.into_body().into_reader();
     let mut response_body = String::new();
     reader.read_to_string(&mut response_body).map_err(|err| {
         PyRuntimeError::new_err(format!("failed to read ClickHouse insert response: {err}"))
     })?;
+    if status != 200 {
+        return Err(PyRuntimeError::new_err(format!(
+            "ClickHouse insert failed with status {status}: {response_body}"
+        )));
+    }
 
     Ok(response_body)
 }
