@@ -79,7 +79,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-fn extract_record_batches(data: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
+pub(crate) fn extract_record_batches(data: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
     if let Ok(batch) = data.extract::<PyRecordBatch>() {
         return Ok(vec![batch.into_inner()]);
     }
@@ -108,15 +108,23 @@ fn write_record_batches_json(
     Ok(batches.iter().map(RecordBatch::num_rows).sum())
 }
 
-fn serialize_record_batches_json(
+pub(crate) fn serialize_record_batches_json(
     batches: &[RecordBatch],
     lines: bool,
     datetime_format: Option<&str>,
 ) -> PyResult<String> {
-    let buffer = Vec::new();
-    let json_bytes = write_json_to_writer(buffer, batches, lines, datetime_format)?;
+    let json_bytes = serialize_record_batches_json_bytes(batches, lines, datetime_format)?;
     String::from_utf8(json_bytes)
         .map_err(|err| PyRuntimeError::new_err(format!("failed to build UTF-8 JSON string: {err}")))
+}
+
+pub(crate) fn serialize_record_batches_json_bytes(
+    batches: &[RecordBatch],
+    lines: bool,
+    datetime_format: Option<&str>,
+) -> PyResult<Vec<u8>> {
+    let buffer = Vec::new();
+    write_json_to_writer(buffer, batches, lines, datetime_format)
 }
 
 fn writer_builder(datetime_format: Option<&str>) -> WriterBuilder {
