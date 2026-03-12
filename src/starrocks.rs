@@ -4,12 +4,12 @@ use std::sync::Arc;
 use arrow::buffer::{BooleanBuffer, NullBuffer, OffsetBuffer};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow_array::builder::{
-    BooleanBuilder, Date32Builder, Decimal128Builder, Float64Builder, Int32Builder,
-    Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
+    BooleanBuilder, Date32Builder, Decimal128Builder, Float64Builder, Int32Builder, Int64Builder,
+    StringBuilder, TimestampMicrosecondBuilder,
 };
 use arrow_array::{ArrayRef, ListArray, RecordBatch};
 use base64::Engine;
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{Local, NaiveDate, NaiveDateTime};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -48,22 +48,22 @@ pub fn query_starrocks_arrow<'py>(
     password: &str,
     catalog: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let (columns, rows) = query_starrocks_rows(
-        base_url,
-        catalog,
-        database,
-        username,
-        password,
-        query,
-    )?;
+    println!("query start:{}", Local::now());
+    let (columns, rows) =
+        query_starrocks_rows(base_url, catalog, database, username, password, query)?;
+    println!("query end:{}", Local::now());
+
     let schema = build_schema(&columns)?;
     let arrays = build_arrays(&columns, &rows)?;
     let batch = RecordBatch::try_new(schema.clone(), arrays)
         .map_err(|err| PyRuntimeError::new_err(format!("failed to build Arrow batch: {err}")))?;
+    println!("build end:{}", Local::now());
 
     PyTable::try_new(vec![batch], schema)?
         .into_pyarrow(py)
-        .map_err(|err| PyRuntimeError::new_err(format!("failed to convert to pyarrow.Table: {err}")))
+        .map_err(|err| {
+            PyRuntimeError::new_err(format!("failed to convert to pyarrow.Table: {err}"))
+        })
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -80,9 +80,7 @@ fn query_starrocks_rows(
     query: &str,
 ) -> PyResult<(Vec<StarRocksColumn>, Vec<Vec<Value>>)> {
     let base_url = base_url.trim_end_matches('/');
-    let url = format!(
-        "{base_url}/api/v1/catalogs/{catalog}/databases/{database}/sql"
-    );
+    let url = format!("{base_url}/api/v1/catalogs/{catalog}/databases/{database}/sql");
     let credentials = format!("{username}:{password}");
     let authorization = format!(
         "Basic {}",
@@ -97,7 +95,9 @@ fn query_starrocks_rows(
     parse_starrocks_lines(reader)
 }
 
-fn parse_starrocks_lines<R: BufRead>(reader: R) -> PyResult<(Vec<StarRocksColumn>, Vec<Vec<Value>>)> {
+fn parse_starrocks_lines<R: BufRead>(
+    reader: R,
+) -> PyResult<(Vec<StarRocksColumn>, Vec<Vec<Value>>)> {
     let mut columns: Option<Vec<StarRocksColumn>> = None;
     let mut rows = Vec::new();
 
@@ -121,7 +121,9 @@ fn parse_starrocks_lines<R: BufRead>(reader: R) -> PyResult<(Vec<StarRocksColumn
                     .get("msg")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown StarRocks error");
-                return Err(PyRuntimeError::new_err(format!("StarRocks query failed: {msg}")));
+                return Err(PyRuntimeError::new_err(format!(
+                    "StarRocks query failed: {msg}"
+                )));
             }
             continue;
         }
@@ -138,22 +140,23 @@ fn parse_starrocks_lines<R: BufRead>(reader: R) -> PyResult<(Vec<StarRocksColumn
         let value: Value = serde_json::from_str(line).map_err(|err| {
             PyRuntimeError::new_err(format!("failed to parse StarRocks data line: {err}"))
         })?;
-        let data = value
-            .get("data")
-            .and_then(Value::as_array)
-            .ok_or_else(|| PyRuntimeError::new_err("StarRocks data line does not contain an array"))?;
+        let data = value.get("data").and_then(Value::as_array).ok_or_else(|| {
+            PyRuntimeError::new_err("StarRocks data line does not contain an array")
+        })?;
         rows.push(data.clone());
     }
 
-    let columns = columns
-        .ok_or_else(|| PyRuntimeError::new_err("StarRocks response does not contain column metadata"))?;
+    let columns = columns.ok_or_else(|| {
+        PyRuntimeError::new_err("StarRocks response does not contain column metadata")
+    })?;
 
     Ok((columns, rows))
 }
 
 fn parse_col_types_from_meta(meta_str: &str) -> PyResult<Vec<StarRocksColumn>> {
-    let json: Value = serde_json::from_str(meta_str)
-        .map_err(|err| PyRuntimeError::new_err(format!("failed to parse StarRocks meta line: {err}")))?;
+    let json: Value = serde_json::from_str(meta_str).map_err(|err| {
+        PyRuntimeError::new_err(format!("failed to parse StarRocks meta line: {err}"))
+    })?;
 
     let meta_array = json
         .get("meta")
@@ -218,7 +221,10 @@ fn build_array_for_column(
     rows: &[Vec<Value>],
 ) -> PyResult<ArrayRef> {
     let starrocks_type = parse_starrocks_type(&column.starrocks_type)?;
-    let values = rows.iter().map(|row| row.get(column_index)).collect::<Vec<_>>();
+    let values = rows
+        .iter()
+        .map(|row| row.get(column_index))
+        .collect::<Vec<_>>();
 
     build_array_from_values(&starrocks_type, &values, &column.name)
 }
@@ -254,12 +260,13 @@ fn build_array_from_values(
                 match value {
                     Some(Value::Null) | None => builder.append_null(),
                     Some(Value::String(value)) => {
-                        let parsed = NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|err| {
-                            PyRuntimeError::new_err(format!(
-                                "failed to parse date for column '{}': {err}",
-                                column_name
-                            ))
-                        })?;
+                        let parsed =
+                            NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|err| {
+                                PyRuntimeError::new_err(format!(
+                                    "failed to parse date for column '{}': {err}",
+                                    column_name
+                                ))
+                            })?;
                         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
                         let days = parsed.signed_duration_since(epoch).num_days();
                         let days = i32::try_from(days).map_err(|err| {
@@ -273,8 +280,7 @@ fn build_array_from_values(
                     Some(value) => {
                         return Err(PyRuntimeError::new_err(format!(
                             "unsupported date JSON value for column '{}': {}",
-                            column_name,
-                            value
+                            column_name, value
                         )));
                     }
                 }
@@ -322,8 +328,7 @@ fn build_array_from_values(
                     Some(value) => {
                         return Err(PyRuntimeError::new_err(format!(
                             "unsupported integer JSON value for column '{}': {}",
-                            column_name,
-                            value
+                            column_name, value
                         )));
                     }
                 }
@@ -365,8 +370,7 @@ fn build_array_from_values(
                     Some(value) => {
                         return Err(PyRuntimeError::new_err(format!(
                             "unsupported integer JSON value for column '{}': {}",
-                            column_name,
-                            value
+                            column_name, value
                         )));
                     }
                 }
@@ -380,12 +384,13 @@ fn build_array_from_values(
                 match value {
                     Some(Value::Null) | None => builder.append_null(),
                     Some(Value::Number(value)) => {
-                        let parsed = parse_decimal_to_i128(&value.to_string(), *scale).map_err(|err| {
-                            PyRuntimeError::new_err(format!(
-                                "failed to parse decimal for column '{}': {err}",
-                                column_name
-                            ))
-                        })?;
+                        let parsed =
+                            parse_decimal_to_i128(&value.to_string(), *scale).map_err(|err| {
+                                PyRuntimeError::new_err(format!(
+                                    "failed to parse decimal for column '{}': {err}",
+                                    column_name
+                                ))
+                            })?;
                         builder.append_value(parsed);
                     }
                     Some(Value::String(value)) => {
@@ -400,8 +405,7 @@ fn build_array_from_values(
                     Some(value) => {
                         return Err(PyRuntimeError::new_err(format!(
                             "unsupported decimal JSON value for column '{}': {}",
-                            column_name,
-                            value
+                            column_name, value
                         )));
                     }
                 }
@@ -434,8 +438,7 @@ fn build_array_from_values(
                     Some(value) => {
                         return Err(PyRuntimeError::new_err(format!(
                             "unsupported float JSON value for column '{}': {}",
-                            column_name,
-                            value
+                            column_name, value
                         )));
                     }
                 }
@@ -450,18 +453,17 @@ fn build_array_from_values(
                     Some(Value::String(value)) => {
                         let parsed = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
                             .map_err(|err| {
-                                PyRuntimeError::new_err(format!(
-                                    "failed to parse datetime for column '{}': {err}",
-                                    column_name
-                                ))
-                            })?;
+                            PyRuntimeError::new_err(format!(
+                                "failed to parse datetime for column '{}': {err}",
+                                column_name
+                            ))
+                        })?;
                         builder.append_value(parsed.and_utc().timestamp_micros());
                     }
                     Some(value) => {
                         return Err(PyRuntimeError::new_err(format!(
                             "unsupported datetime JSON value for column '{}': {}",
-                            column_name,
-                            value
+                            column_name, value
                         )));
                     }
                 }
@@ -507,8 +509,7 @@ fn build_list_array(
             Some(other) => {
                 return Err(PyRuntimeError::new_err(format!(
                     "unsupported array JSON value for column '{}': {}",
-                    column_name,
-                    other
+                    column_name, other
                 )));
             }
         }
@@ -539,11 +540,7 @@ fn parse_starrocks_type(starrocks_type: &str) -> PyResult<StarRocksType> {
         return Ok(StarRocksType::Array(Box::new(parse_starrocks_type(inner)?)));
     }
 
-    let base = normalized
-        .split('(')
-        .next()
-        .unwrap_or(&normalized)
-        .trim();
+    let base = normalized.split('(').next().unwrap_or(&normalized).trim();
 
     Ok(match base {
         "bool" | "boolean" => StarRocksType::Boolean,
@@ -551,12 +548,13 @@ fn parse_starrocks_type(starrocks_type: &str) -> PyResult<StarRocksType> {
         "tinyint" | "smallint" | "int" | "integer" => StarRocksType::Int32,
         "bigint" => StarRocksType::Int64,
         "decimal" | "decimal32" | "decimal64" | "decimal128" => {
-            let (precision, scale) = parse_decimal_precision_scale(&normalized).ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "failed to parse decimal precision/scale from type '{}'",
-                    starrocks_type
-                ))
-            })?;
+            let (precision, scale) =
+                parse_decimal_precision_scale(&normalized).ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "failed to parse decimal precision/scale from type '{}'",
+                        starrocks_type
+                    ))
+                })?;
             StarRocksType::Decimal128(precision, scale)
         }
         "float" | "double" => StarRocksType::Float64,
@@ -628,7 +626,9 @@ fn parse_decimal_to_i128(value: &str, scale: i8) -> Result<i128, String> {
     let integer_value = if integer_part.is_empty() {
         0_i128
     } else {
-        integer_part.parse::<i128>().map_err(|err| err.to_string())?
+        integer_part
+            .parse::<i128>()
+            .map_err(|err| err.to_string())?
     };
     let mut fraction = fractional_part.to_string();
     if fraction.len() > scale {
@@ -667,14 +667,12 @@ mod tests {
 
     use arrow::datatypes::{DataType, Field, TimeUnit};
     use arrow_array::{
-        Array, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int32Array,
-        ListArray, StringArray, TimestampMicrosecondArray,
+        Array, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int32Array, ListArray,
+        StringArray, TimestampMicrosecondArray,
     };
     use serde_json::json;
 
-    use super::{
-        build_arrays, build_schema, parse_col_types_from_meta, parse_starrocks_lines,
-    };
+    use super::{build_arrays, build_schema, parse_col_types_from_meta, parse_starrocks_lines};
 
     #[test]
     fn parses_meta_line() {
@@ -758,7 +756,10 @@ mod tests {
         assert_eq!(birthday_array.value(1), 19725);
         assert!(birthday_array.is_null(2));
 
-        let amount_array = arrays[2].as_any().downcast_ref::<Decimal128Array>().unwrap();
+        let amount_array = arrays[2]
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap();
         assert_eq!(amount_array.value(0), 12345);
         assert_eq!(amount_array.value(1), -12);
         assert!(amount_array.is_null(2));
@@ -841,15 +842,9 @@ mod tests {
         let password = "";
         let sql = "select * from test_types limit 10";
 
-        let (columns, rows) = super::query_starrocks_rows(
-            url,
-            "default_catalog",
-            database,
-            username,
-            password,
-            sql,
-        )
-        .unwrap();
+        let (columns, rows) =
+            super::query_starrocks_rows(url, "default_catalog", database, username, password, sql)
+                .unwrap();
         let arrays = build_arrays(&columns, &rows).unwrap();
 
         assert!(!columns.is_empty());

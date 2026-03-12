@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.28.2", features = ["extension-module"] }
 pyo3-arrow = "0.16.0"
 arrow = { version = "57.3.0"}
+arrow-json = "57.3.0"
 arrow-array = "57.3.0"
 ureq = { version = "3.2", features = ["json", "gzip", "charset"] }
 serde = { version = "1.0.194", features = ["derive"] }
