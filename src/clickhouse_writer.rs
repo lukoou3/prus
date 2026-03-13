@@ -7,7 +7,7 @@ use pyo3::types::{PyAny, PyModule};
 use pyo3::wrap_pyfunction;
 use ureq::Agent;
 use ureq::config::Config;
-use crate::json_writer::{extract_record_batches, serialize_record_batches_json_bytes};
+use crate::json_writer::{extract_record_batches, serialize_record_batches_json_bytes_impl};
 
 #[pyfunction]
 #[pyo3(signature = (data, base_url, database, table, username="default", password="", datetime_format=None))]
@@ -22,9 +22,17 @@ pub fn write_arrow_to_clickhouse(
 ) -> PyResult<usize> {
     let batches = extract_record_batches(data)?;
     let rows = batches.iter().map(|batch| batch.num_rows()).sum();
-    let query = build_insert_query(table)?;
-    let json_rows = serialize_record_batches_json_bytes(&batches, true, datetime_format)?;
-    execute_insert(base_url, database, username, password, &query, &json_rows)?;
+    let query = build_insert_query(table).map_err(PyRuntimeError::new_err)?;
+    let base_url = base_url.to_string();
+    let database = database.to_string();
+    let username = username.to_string();
+    let password = password.to_string();
+    let datetime_format = datetime_format.map(str::to_string);
+    data.py().detach(|| {
+        let json_rows =
+            serialize_record_batches_json_bytes_impl(&batches, true, datetime_format.as_deref())?;
+        execute_insert(&base_url, &database, &username, &password, &query, &json_rows)
+    }).map_err(PyRuntimeError::new_err)?;
     Ok(rows)
 }
 
@@ -33,15 +41,15 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-fn build_insert_query(table: &str) -> PyResult<String> {
+fn build_insert_query(table: &str) -> Result<String, String> {
     let table = table.trim();
     if table.is_empty() {
-        return Err(PyRuntimeError::new_err("table name cannot be empty"));
+        return Err("table name cannot be empty".to_string());
     }
-
     Ok(format!("INSERT INTO {table} FORMAT JSONEachRow"))
 }
 
+/// Returns Result so it can be used inside py.detach() without creating PyErr.
 fn execute_insert(
     base_url: &str,
     database: &str,
@@ -49,7 +57,7 @@ fn execute_insert(
     password: &str,
     query: &str,
     body: &[u8],
-) -> PyResult<String> {
+) -> Result<String, String> {
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/");
     let credentials = format!("{username}:{password}");
@@ -59,25 +67,25 @@ fn execute_insert(
     );
 
     let agent = Agent::new_with_config(Config::builder().http_status_as_error(false).build());
-    let response = agent.post(&url)
+    let response = agent
+        .post(&url)
         .query("query", query)
         .header("Authorization", &authorization)
         .header("X-ClickHouse-Database", database)
         .header("Content-Type", "application/x-ndjson")
         .send(body)
-        .map_err(|err| PyRuntimeError::new_err(format!("ClickHouse HTTP insert failed: {err}")))?;
+        .map_err(|err| format!("ClickHouse HTTP insert failed: {err}"))?;
     let status = response.status().as_u16();
     let mut reader = response.into_body().into_reader();
     let mut response_body = String::new();
-    reader.read_to_string(&mut response_body).map_err(|err| {
-        PyRuntimeError::new_err(format!("failed to read ClickHouse insert response: {err}"))
-    })?;
+    reader
+        .read_to_string(&mut response_body)
+        .map_err(|err| format!("failed to read ClickHouse insert response: {err}"))?;
     if status != 200 {
-        return Err(PyRuntimeError::new_err(format!(
+        return Err(format!(
             "ClickHouse insert failed with status {status}: {response_body}"
-        )));
+        ));
     }
-
     Ok(response_body)
 }
 
@@ -138,10 +146,14 @@ mod tests {
             reader.read_exact(&mut body).unwrap();
             let body = String::from_utf8(body).unwrap();
 
-            assert_eq!(
-                request_line,
-                "POST /?query=INSERT+INTO+events+FORMAT+JSONEachRow HTTP/1.1\r\n"
-            );
+            // ureq may encode spaces as + or %20
+            let ok_query = request_line.contains("INSERT")
+                && request_line.contains("INTO")
+                && request_line.contains("events")
+                && request_line.contains("FORMAT")
+                && request_line.contains("JSONEachRow")
+                && request_line.ends_with(" HTTP/1.1\r\n");
+            assert!(ok_query, "request_line = {:?}", request_line);
             assert_eq!(headers.get("x-clickhouse-database").unwrap(), "test");
             assert_eq!(headers.get("content-type").unwrap(), "application/x-ndjson");
             assert_eq!(

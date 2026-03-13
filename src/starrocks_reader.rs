@@ -42,9 +42,10 @@ enum StarRocksType {
 // ----- trait: build one Arrow column from a stream of JSON values -----
 
 /// Builds an Arrow column by appending one value at a time (no intermediate Vec<Vec<Value>>).
+/// Returns Result (not PyResult) so the same impl can be used inside py.detach() without creating PyErr.
 trait ArrowColumnBuilder {
-    fn append(&mut self, value: Option<&Value>, column_name: &str) -> PyResult<()>;
-    fn finish(self) -> PyResult<ArrayRef>;
+    fn append(&mut self, value: Option<&Value>, column_name: &str) -> Result<(), String>;
+    fn finish(self) -> Result<ArrayRef, String>;
 }
 
 /// One builder per column type; list uses inner builder + lengths/null bitmap.
@@ -66,19 +67,16 @@ enum ColumnBuilder {
 }
 
 impl ArrowColumnBuilder for ColumnBuilder {
-    fn append(&mut self, value: Option<&Value>, column_name: &str) -> PyResult<()> {
+    fn append(&mut self, value: Option<&Value>, column_name: &str) -> Result<(), String> {
         match self {
             ColumnBuilder::Boolean(b) => {
                 match value {
                     Some(Value::Null) | None => b.append_null(),
                     Some(Value::Bool(v)) => b.append_value(*v),
                     Some(v) => {
-                        let parsed = value_to_string(v).parse::<bool>().map_err(|e| {
-                            PyRuntimeError::new_err(format!(
-                                "failed to parse boolean for column '{}': {}",
-                                column_name, e
-                            ))
-                        })?;
+                        let parsed = value_to_string(v)
+                            .parse::<bool>()
+                            .map_err(|e| format!("failed to parse boolean for column '{}': {}", column_name, e))?;
                         b.append_value(parsed);
                     }
                 }
@@ -88,28 +86,16 @@ impl ArrowColumnBuilder for ColumnBuilder {
                 match value {
                     Some(Value::Null) | None => b.append_null(),
                     Some(Value::String(s)) => {
-                        let parsed =
-                            NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| {
-                                PyRuntimeError::new_err(format!(
-                                    "failed to parse date for column '{}': {}",
-                                    column_name, e
-                                ))
-                            })?;
+                        let parsed = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                            .map_err(|e| format!("failed to parse date for column '{}': {}", column_name, e))?;
                         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
                         let days = parsed.signed_duration_since(epoch).num_days();
-                        let days = i32::try_from(days).map_err(|e| {
-                            PyRuntimeError::new_err(format!(
-                                "date overflow for column '{}': {}",
-                                column_name, e
-                            ))
-                        })?;
+                        let days = i32::try_from(days)
+                            .map_err(|e| format!("date overflow for column '{}': {}", column_name, e))?;
                         b.append_value(days);
                     }
                     Some(v) => {
-                        return Err(PyRuntimeError::new_err(format!(
-                            "unsupported date JSON value for column '{}': {}",
-                            column_name, v
-                        )))
+                        return Err(format!("unsupported date JSON value for column '{}': {}", column_name, v));
                     }
                 }
                 Ok(())
@@ -140,10 +126,7 @@ impl ArrowColumnBuilder for ColumnBuilder {
                         nulls.push(true);
                     }
                     Some(v) => {
-                        return Err(PyRuntimeError::new_err(format!(
-                            "unsupported array JSON value for column '{}': {}",
-                            column_name, v
-                        )))
+                        return Err(format!("unsupported array JSON value for column '{}': {}", column_name, v));
                     }
                 }
                 Ok(())
@@ -151,7 +134,7 @@ impl ArrowColumnBuilder for ColumnBuilder {
         }
     }
 
-    fn finish(self) -> PyResult<ArrayRef> {
+    fn finish(self) -> Result<ArrayRef, String> {
         match self {
             ColumnBuilder::Boolean(mut b) => Ok(Arc::new(b.finish())),
             ColumnBuilder::Date32(mut b) => Ok(Arc::new(b.finish())),
@@ -187,88 +170,54 @@ impl ArrowColumnBuilder for ColumnBuilder {
     }
 }
 
-fn append_int32(b: &mut Int32Builder, value: Option<&Value>, column_name: &str) -> PyResult<()> {
+fn append_int32(b: &mut Int32Builder, value: Option<&Value>, column_name: &str) -> Result<(), String> {
     match value {
         Some(Value::Null) | None => b.append_null(),
         Some(Value::Number(n)) => {
             if let Some(i) = n.as_i64() {
-                let i = i32::try_from(i).map_err(|e| {
-                    PyRuntimeError::new_err(format!(
-                        "integer overflow for column '{}': {}",
-                        column_name, e
-                    ))
-                })?;
+                let i = i32::try_from(i)
+                    .map_err(|e| format!("integer overflow for column '{}': {}", column_name, e))?;
                 b.append_value(i);
             } else if let Some(u) = n.as_u64() {
-                let i = i32::try_from(u).map_err(|e| {
-                    PyRuntimeError::new_err(format!(
-                        "integer overflow for column '{}': {}",
-                        column_name, e
-                    ))
-                })?;
+                let i = i32::try_from(u)
+                    .map_err(|e| format!("integer overflow for column '{}': {}", column_name, e))?;
                 b.append_value(i);
             } else {
-                return Err(PyRuntimeError::new_err(format!(
-                    "unsupported integer value for column '{}'",
-                    column_name
-                )));
+                return Err(format!("unsupported integer value for column '{}'", column_name));
             }
         }
         Some(Value::String(s)) => {
-            let i = s.parse::<i32>().map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "failed to parse integer for column '{}': {}",
-                    column_name, e
-                ))
-            })?;
+            let i = s
+                .parse::<i32>()
+                .map_err(|e| format!("failed to parse integer for column '{}': {}", column_name, e))?;
             b.append_value(i);
         }
-        Some(v) => {
-            return Err(PyRuntimeError::new_err(format!(
-                "unsupported integer JSON value for column '{}': {}",
-                column_name, v
-            )))
-        }
+        Some(v) => return Err(format!("unsupported integer JSON value for column '{}': {}", column_name, v)),
     }
     Ok(())
 }
 
-fn append_int64(b: &mut Int64Builder, value: Option<&Value>, column_name: &str) -> PyResult<()> {
+fn append_int64(b: &mut Int64Builder, value: Option<&Value>, column_name: &str) -> Result<(), String> {
     match value {
         Some(Value::Null) | None => b.append_null(),
         Some(Value::Number(n)) => {
             if let Some(i) = n.as_i64() {
                 b.append_value(i);
             } else if let Some(u) = n.as_u64() {
-                let i = i64::try_from(u).map_err(|e| {
-                    PyRuntimeError::new_err(format!(
-                        "integer overflow for column '{}': {}",
-                        column_name, e
-                    ))
-                })?;
+                let i = i64::try_from(u)
+                    .map_err(|e| format!("integer overflow for column '{}': {}", column_name, e))?;
                 b.append_value(i);
             } else {
-                return Err(PyRuntimeError::new_err(format!(
-                    "unsupported integer value for column '{}'",
-                    column_name
-                )));
+                return Err(format!("unsupported integer value for column '{}'", column_name));
             }
         }
         Some(Value::String(s)) => {
-            let i = s.parse::<i64>().map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "failed to parse integer for column '{}': {}",
-                    column_name, e
-                ))
-            })?;
+            let i = s
+                .parse::<i64>()
+                .map_err(|e| format!("failed to parse integer for column '{}': {}", column_name, e))?;
             b.append_value(i);
         }
-        Some(v) => {
-            return Err(PyRuntimeError::new_err(format!(
-                "unsupported integer JSON value for column '{}': {}",
-                column_name, v
-            )))
-        }
+        Some(v) => return Err(format!("unsupported integer JSON value for column '{}': {}", column_name, v)),
     }
     Ok(())
 }
@@ -278,63 +227,42 @@ fn append_decimal128(
     scale: i8,
     value: Option<&Value>,
     column_name: &str,
-) -> PyResult<()> {
+) -> Result<(), String> {
     match value {
         Some(Value::Null) | None => b.append_null(),
         Some(Value::Number(n)) => {
-            let parsed = parse_decimal_to_i128(&n.to_string(), scale).map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "failed to parse decimal for column '{}': {}",
-                    column_name, e
-                ))
-            })?;
+            let parsed = parse_decimal_to_i128(&n.to_string(), scale)
+                .map_err(|e| format!("failed to parse decimal for column '{}': {}", column_name, e))?;
             b.append_value(parsed);
         }
         Some(Value::String(s)) => {
-            let parsed = parse_decimal_to_i128(s, scale).map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "failed to parse decimal for column '{}': {}",
-                    column_name, e
-                ))
-            })?;
+            let parsed = parse_decimal_to_i128(s, scale)
+                .map_err(|e| format!("failed to parse decimal for column '{}': {}", column_name, e))?;
             b.append_value(parsed);
         }
         Some(v) => {
-            return Err(PyRuntimeError::new_err(format!(
-                "unsupported decimal JSON value for column '{}': {}",
-                column_name, v
-            )))
+            return Err(format!("unsupported decimal JSON value for column '{}': {}", column_name, v));
         }
     }
     Ok(())
 }
 
-fn append_float64(b: &mut Float64Builder, value: Option<&Value>, column_name: &str) -> PyResult<()> {
+fn append_float64(b: &mut Float64Builder, value: Option<&Value>, column_name: &str) -> Result<(), String> {
     match value {
         Some(Value::Null) | None => b.append_null(),
         Some(Value::Number(n)) => {
-            let f = n.as_f64().ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "failed to convert numeric value for column '{}'",
-                    column_name
-                ))
-            })?;
+            let f = n.as_f64()
+                .ok_or_else(|| format!("failed to convert numeric value for column '{}'", column_name))?;
             b.append_value(f);
         }
         Some(Value::String(s)) => {
-            let f = s.parse::<f64>().map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "failed to parse float for column '{}': {}",
-                    column_name, e
-                ))
-            })?;
+            let f = s
+                .parse::<f64>()
+                .map_err(|e| format!("failed to parse float for column '{}': {}", column_name, e))?;
             b.append_value(f);
         }
         Some(v) => {
-            return Err(PyRuntimeError::new_err(format!(
-                "unsupported float JSON value for column '{}': {}",
-                column_name, v
-            )))
+            return Err(format!("unsupported float JSON value for column '{}': {}", column_name, v));
         }
     }
     Ok(())
@@ -344,24 +272,16 @@ fn append_datetime(
     b: &mut TimestampMicrosecondBuilder,
     value: Option<&Value>,
     column_name: &str,
-) -> PyResult<()> {
+) -> Result<(), String> {
     match value {
         Some(Value::Null) | None => b.append_null(),
         Some(Value::String(s)) => {
             let parsed = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!(
-                        "failed to parse datetime for column '{}': {}",
-                        column_name, e
-                    ))
-                })?;
+                .map_err(|e| format!("failed to parse datetime for column '{}': {}", column_name, e))?;
             b.append_value(parsed.and_utc().timestamp_micros());
         }
         Some(v) => {
-            return Err(PyRuntimeError::new_err(format!(
-                "unsupported datetime JSON value for column '{}': {}",
-                column_name, v
-            )))
+            return Err(format!("unsupported datetime JSON value for column '{}': {}", column_name, v));
         }
     }
     Ok(())
@@ -426,7 +346,7 @@ fn parse_decimal_to_i128(value: &str, scale: i8) -> Result<i128, String> {
     Ok(if negative { -scaled } else { scaled })
 }
 
-fn parse_starrocks_type(starrocks_type: &str) -> PyResult<StarRocksType> {
+fn parse_starrocks_type(starrocks_type: &str) -> Result<StarRocksType, String> {
     let normalized = starrocks_type.trim().to_ascii_lowercase();
     if normalized.starts_with("array<") && normalized.ends_with('>') {
         let inner = &normalized["array<".len()..normalized.len() - 1];
@@ -440,10 +360,7 @@ fn parse_starrocks_type(starrocks_type: &str) -> PyResult<StarRocksType> {
         "bigint" => StarRocksType::Int64,
         "decimal" | "decimal32" | "decimal64" | "decimal128" => {
             let (precision, scale) = parse_decimal_precision_scale(&normalized).ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "failed to parse decimal precision/scale from type '{}'",
-                    starrocks_type
-                ))
+                format!("failed to parse decimal precision/scale from type '{}'", starrocks_type)
             })?;
             StarRocksType::Decimal128(precision, scale)
         }
@@ -482,7 +399,7 @@ fn starrocks_type_to_arrow_data_type(starrocks_type: &StarRocksType) -> DataType
     }
 }
 
-fn build_schema(columns: &[StarRocksColumn]) -> PyResult<SchemaRef> {
+fn build_schema(columns: &[StarRocksColumn]) -> Result<SchemaRef, String> {
     let fields = columns
         .iter()
         .map(|c| {
@@ -493,32 +410,29 @@ fn build_schema(columns: &[StarRocksColumn]) -> PyResult<SchemaRef> {
                 true,
             ))
         })
-        .collect::<PyResult<Vec<_>>>()?;
+        .collect::<Result<Vec<Field>, String>>()?;
     Ok(Arc::new(Schema::new(fields)))
 }
 
-fn parse_col_types_from_meta(meta_str: &str) -> PyResult<Vec<StarRocksColumn>> {
-    let json: Value = serde_json::from_str(meta_str).map_err(|e| {
-        PyRuntimeError::new_err(format!("failed to parse StarRocks meta line: {e}"))
-    })?;
+fn parse_col_types_from_meta(meta_str: &str) -> Result<Vec<StarRocksColumn>, String> {
+    let json: Value = serde_json::from_str(meta_str)
+        .map_err(|e| format!("failed to parse StarRocks meta line: {e}"))?;
     let meta_array = json
         .get("meta")
         .and_then(Value::as_array)
-        .ok_or_else(|| PyRuntimeError::new_err("missing 'meta' or not array"))?;
+        .ok_or("missing 'meta' or not array")?;
     let mut result = Vec::with_capacity(meta_array.len());
     for item in meta_array {
-        let obj = item
-            .as_object()
-            .ok_or_else(|| PyRuntimeError::new_err("meta item not object"))?;
+        let obj = item.as_object().ok_or("meta item not object")?;
         let name = obj
             .get("name")
             .and_then(Value::as_str)
-            .ok_or_else(|| PyRuntimeError::new_err("missing column name"))?
+            .ok_or("missing column name")?
             .to_string();
         let starrocks_type = obj
             .get("type")
             .and_then(Value::as_str)
-            .ok_or_else(|| PyRuntimeError::new_err("missing column type"))?
+            .ok_or("missing column type")?
             .to_string();
         result.push(StarRocksColumn {
             name,
@@ -529,7 +443,7 @@ fn parse_col_types_from_meta(meta_str: &str) -> PyResult<Vec<StarRocksColumn>> {
 }
 
 /// Create one column builder from column metadata (no row count yet; we grow as we append).
-fn make_builder(column: &StarRocksColumn) -> PyResult<ColumnBuilder> {
+fn make_builder(column: &StarRocksColumn) -> Result<ColumnBuilder, String> {
     let t = parse_starrocks_type(&column.starrocks_type)?;
     Ok(match &t {
         StarRocksType::Boolean => ColumnBuilder::Boolean(BooleanBuilder::new()),
@@ -555,7 +469,7 @@ fn make_builder(column: &StarRocksColumn) -> PyResult<ColumnBuilder> {
     })
 }
 
-fn make_builder_for_type(item_type: &StarRocksType, _name: &str) -> PyResult<ColumnBuilder> {
+fn make_builder_for_type(item_type: &StarRocksType, _name: &str) -> Result<ColumnBuilder, String> {
     match item_type {
         StarRocksType::Boolean => Ok(ColumnBuilder::Boolean(BooleanBuilder::new())),
         StarRocksType::Date => Ok(ColumnBuilder::Date32(Date32Builder::new())),
@@ -581,29 +495,32 @@ fn make_builder_for_type(item_type: &StarRocksType, _name: &str) -> PyResult<Col
 }
 
 /// Parse StarRocks NDJSON response from a reader into (schema, record batch).
+/// Returns PyResult for use when holding GIL (e.g. tests).
 fn parse_starrocks_response<R: BufRead>(reader: R) -> PyResult<(SchemaRef, RecordBatch)> {
+    parse_starrocks_response_impl(reader).map_err(PyRuntimeError::new_err)
+}
+
+/// Same as parse_starrocks_response but returns Result<_, String>. Safe to call inside py.detach().
+fn parse_starrocks_response_impl<R: BufRead>(reader: R) -> Result<(SchemaRef, RecordBatch), String> {
     let mut columns: Option<Vec<StarRocksColumn>> = None;
     let mut builders: Vec<ColumnBuilder> = Vec::new();
 
     for line_result in reader.lines() {
-        let line = line_result.map_err(|e| {
-            PyRuntimeError::new_err(format!("failed to read StarRocks response line: {e}"))
-        })?;
+        let line = line_result.map_err(|e| format!("failed to read StarRocks response line: {e}"))?;
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         if line.starts_with("{\"status\"") {
-            let value: Value = serde_json::from_str(line).map_err(|e| {
-                PyRuntimeError::new_err(format!("failed to parse StarRocks status line: {e}"))
-            })?;
+            let value: Value = serde_json::from_str(line)
+                .map_err(|e| format!("failed to parse StarRocks status line: {e}"))?;
             let status = value.get("status").and_then(Value::as_str).unwrap_or("");
             if status.eq_ignore_ascii_case("FAILED") {
                 let msg = value
                     .get("msg")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown StarRocks error");
-                return Err(PyRuntimeError::new_err(format!("StarRocks query failed: {msg}")));
+                return Err(format!("StarRocks query failed: {msg}"));
             }
             continue;
         }
@@ -614,18 +531,18 @@ fn parse_starrocks_response<R: BufRead>(reader: R) -> PyResult<(SchemaRef, Recor
                 .unwrap()
                 .iter()
                 .map(make_builder)
-                .collect::<PyResult<Vec<_>>>()?;
+                .collect::<Result<Vec<ColumnBuilder>, String>>()?;
             continue;
         }
         if !line.starts_with("{\"data\"") {
             continue;
         }
-        let value: Value = serde_json::from_str(line).map_err(|e| {
-            PyRuntimeError::new_err(format!("failed to parse StarRocks data line: {e}"))
-        })?;
-        let data = value.get("data").and_then(Value::as_array).ok_or_else(|| {
-            PyRuntimeError::new_err("StarRocks data line does not contain an array")
-        })?;
+        let value: Value = serde_json::from_str(line)
+            .map_err(|e| format!("failed to parse StarRocks data line: {e}"))?;
+        let data = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or("StarRocks data line does not contain an array")?;
         for (i, b) in builders.iter_mut().enumerate() {
             let cell = data.get(i);
             let column_name = &columns.as_ref().unwrap()[i].name;
@@ -633,19 +550,19 @@ fn parse_starrocks_response<R: BufRead>(reader: R) -> PyResult<(SchemaRef, Recor
         }
     }
 
-    let columns = columns.ok_or_else(|| {
-        PyRuntimeError::new_err("StarRocks response does not contain column metadata")
-    })?;
+    let columns = columns.ok_or("StarRocks response does not contain column metadata")?;
     let schema = build_schema(&columns)?;
     let arrays: Vec<ArrayRef> = builders
         .into_iter()
         .map(ArrowColumnBuilder::finish)
-        .collect::<PyResult<Vec<_>>>()?;
+        .collect::<Result<Vec<ArrayRef>, String>>()?;
     let batch = RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| PyRuntimeError::new_err(format!("failed to build Arrow batch: {e}")))?;
+        .map_err(|e| format!("failed to build Arrow batch: {e}"))?;
     Ok((schema, batch))
 }
 
+/// HTTP + stream parse. Returns Result so it can be used inside py.detach() without creating PyErr.
+/// Reads directly from the response stream (no full body Vec<u8>).
 fn query_starrocks_arrow_impl(
     base_url: &str,
     catalog: &str,
@@ -653,7 +570,7 @@ fn query_starrocks_arrow_impl(
     username: &str,
     password: &str,
     query: &str,
-) -> PyResult<(SchemaRef, RecordBatch)> {
+) -> Result<(SchemaRef, RecordBatch), String> {
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/api/v1/catalogs/{catalog}/databases/{database}/sql");
     let credentials = format!("{username}:{password}");
@@ -664,11 +581,13 @@ fn query_starrocks_arrow_impl(
     let response = ureq::post(&url)
         .header("Authorization", &authorization)
         .send_json(json!({ "query": query }))
-        .map_err(|e| PyRuntimeError::new_err(format!("StarRocks HTTP request failed: {e}")))?;
-
-    parse_starrocks_response(BufReader::new(response.into_body().into_reader()))
+        .map_err(|e| format!("StarRocks HTTP request failed: {e}"))?;
+    let reader = BufReader::new(response.into_body().into_reader());
+    parse_starrocks_response_impl(reader)
 }
 
+/// Query StarRocks and return a PyArrow Table.
+/// HTTP and parsing run without holding the GIL, so multiple threads can run queries in parallel.
 #[pyfunction]
 #[pyo3(signature = (base_url, database, query, username="root", password="", catalog="default_catalog"))]
 pub fn query_starrocks_arrow<'py>(
@@ -680,8 +599,24 @@ pub fn query_starrocks_arrow<'py>(
     password: &str,
     catalog: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let (schema, batch) =
-        query_starrocks_arrow_impl(base_url, catalog, database, username, password, query)?;
+    let base_url = base_url.to_string();
+    let catalog = catalog.to_string();
+    let database = database.to_string();
+    let username = username.to_string();
+    let password = password.to_string();
+    let query = query.to_string();
+    let (schema, batch) = py
+        .detach(|| {
+            query_starrocks_arrow_impl(
+                &base_url,
+                &catalog,
+                &database,
+                &username,
+                &password,
+                &query,
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
     PyTable::try_new(vec![batch], schema)?
         .into_pyarrow(py)
         .map_err(|e| {

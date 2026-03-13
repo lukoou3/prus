@@ -8,7 +8,7 @@ use pyo3::wrap_pyfunction;
 use serde_json::Value;
 use ureq::Agent;
 
-use crate::json_writer::{extract_record_batches, serialize_record_batches_json_bytes};
+use crate::json_writer::{extract_record_batches, serialize_record_batches_json_bytes_impl};
 
 #[pyfunction]
 #[pyo3(signature = (data, base_url, database, table, username="root", password="", datetime_format=None, label=None))]
@@ -23,10 +23,31 @@ pub fn write_arrow_to_starrocks(
     label: Option<&str>,
 ) -> PyResult<String> {
     let batches = extract_record_batches(data)?;
-    let body = serialize_record_batches_json_bytes(&batches, false, datetime_format)?;
-    stream_load_json(
-        base_url, database, table, username, password, body, label,
-    )
+    let base_url = base_url.to_string();
+    let database = database.to_string();
+    let table = table.to_string();
+    let username = username.to_string();
+    let password = password.to_string();
+    let label = label.map(str::to_string);
+    let datetime_format = datetime_format.map(str::to_string);
+    data.py()
+        .detach(|| {
+            let body = serialize_record_batches_json_bytes_impl(
+                &batches,
+                false,
+                datetime_format.as_deref(),
+            )?;
+            stream_load_json(
+                &base_url,
+                &database,
+                &table,
+                &username,
+                &password,
+                body,
+                label.as_deref(),
+            )
+        })
+        .map_err(PyRuntimeError::new_err)
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -34,6 +55,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+/// Returns Result so it can be used inside py.detach() without creating PyErr.
 fn stream_load_json(
     base_url: &str,
     database: &str,
@@ -42,7 +64,7 @@ fn stream_load_json(
     password: &str,
     body: Vec<u8>,
     label: Option<&str>,
-) -> PyResult<String> {
+) -> Result<String, String> {
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/api/{database}/{table}/_stream_load");
     let credentials = format!("{username}:{password}");
@@ -70,9 +92,9 @@ fn stream_load_json(
         )? {
             StreamLoadResponse::Completed(body) => body,
             StreamLoadResponse::Redirect(_) => {
-                return Err(PyRuntimeError::new_err(
-                    "StarRocks stream load received repeated redirect response",
-                ));
+                return Err(
+                    "StarRocks stream load received repeated redirect response".to_string(),
+                );
             }
         },
     };
@@ -92,7 +114,7 @@ fn send_stream_load_request(
     authorization: &str,
     body: &[u8],
     label: Option<&str>,
-) -> PyResult<StreamLoadResponse> {
+) -> Result<StreamLoadResponse, String> {
     let mut request = agent
         .put(url)
         .header("Authorization", authorization)
@@ -107,44 +129,39 @@ fn send_stream_load_request(
         request = request.header("label", label);
     }
 
-    let response = request.send(body).map_err(|err| {
-        PyRuntimeError::new_err(format!("StarRocks stream load request failed: {err}"))
-    })?;
+    let response = request
+        .send(body)
+        .map_err(|err| format!("StarRocks stream load request failed: {err}"))?;
 
     if response.status().as_u16() == 307 {
         let location = response.headers().get("location").ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "StarRocks stream load redirect response missing Location header",
-            )
+            "StarRocks stream load redirect response missing Location header".to_string()
         })?;
-        let redirect_url = location.to_str().map_err(|err| {
-            PyRuntimeError::new_err(format!(
-                "StarRocks stream load redirect Location header is invalid: {err}"
-            ))
-        })?;
-        return Ok(StreamLoadResponse::Redirect(redirect_url.to_string()));
+        let redirect_url = location
+            .to_str()
+            .map_err(|err| {
+                format!("StarRocks stream load redirect Location header is invalid: {err}")
+            })?
+            .to_string();
+        return Ok(StreamLoadResponse::Redirect(redirect_url));
     }
 
     let mut reader = response.into_body().into_reader();
     let mut response_body = String::new();
-    reader.read_to_string(&mut response_body).map_err(|err| {
-        PyRuntimeError::new_err(format!("failed to read StarRocks stream load response: {err}"))
-    })?;
+    reader
+        .read_to_string(&mut response_body)
+        .map_err(|err| format!("failed to read StarRocks stream load response: {err}"))?;
     Ok(StreamLoadResponse::Completed(response_body))
 }
 
-fn validate_stream_load_response(response_body: &str) -> PyResult<()> {
+fn validate_stream_load_response(response_body: &str) -> Result<(), String> {
     let response_body = response_body.trim();
     if response_body.is_empty() {
-        return Err(PyRuntimeError::new_err(
-            "StarRocks stream load returned an empty response body",
-        ));
+        return Err("StarRocks stream load returned an empty response body".to_string());
     }
 
     let value: Value = serde_json::from_str(response_body).map_err(|err| {
-        PyRuntimeError::new_err(format!(
-            "failed to parse StarRocks stream load response JSON: {err}"
-        ))
+        format!("failed to parse StarRocks stream load response JSON: {err}")
     })?;
 
     if let Some(status) = value.get("Status").and_then(Value::as_str) {
@@ -160,14 +177,10 @@ fn validate_stream_load_response(response_body: &str) -> PyResult<()> {
             .and_then(Value::as_str)
             .unwrap_or("unknown StarRocks error");
 
-        return Err(PyRuntimeError::new_err(format!(
-            "StarRocks stream load failed: {status} - {message}"
-        )));
+        return Err(format!("StarRocks stream load failed: {status} - {message}"));
     }
 
-    Err(PyRuntimeError::new_err(
-        "StarRocks stream load response does not contain a Status field",
-    ))
+    Err("StarRocks stream load response does not contain a Status field".to_string())
 }
 
 #[cfg(test)]

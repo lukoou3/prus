@@ -17,7 +17,11 @@ pub fn write_arrow_json(
     datetime_format: Option<&str>,
 ) -> PyResult<usize> {
     let batches = extract_record_batches(data)?;
-    write_record_batches_json(path, &batches, lines, datetime_format)
+    let path = path.to_string();
+    let datetime_format = datetime_format.map(str::to_string);
+    data.py()
+        .detach(|| write_record_batches_json_impl(&path, &batches, lines, datetime_format.as_deref()))
+        .map_err(PyRuntimeError::new_err)
 }
 
 #[pyfunction]
@@ -48,7 +52,14 @@ pub fn dumps_arrow_json(
     datetime_format: Option<&str>,
 ) -> PyResult<String> {
     let batches = extract_record_batches(data)?;
-    serialize_record_batches_json(&batches, lines, datetime_format)
+    let datetime_format = datetime_format.map(str::to_string);
+    data.py()
+        .detach(|| {
+            let json_bytes =
+                serialize_record_batches_json_bytes_impl(&batches, lines, datetime_format.as_deref())?;
+            String::from_utf8(json_bytes).map_err(|e| format!("failed to build UTF-8 JSON string: {e}"))
+        })
+        .map_err(PyRuntimeError::new_err)
 }
 
 #[pyfunction]
@@ -100,11 +111,21 @@ fn write_record_batches_json(
     lines: bool,
     datetime_format: Option<&str>,
 ) -> PyResult<usize> {
-    let file = File::create(path).map_err(|err| {
-        PyRuntimeError::new_err(format!("failed to create JSON file '{path}': {err}"))
-    })?;
+    write_record_batches_json_impl(path, batches, lines, datetime_format)
+        .map_err(PyRuntimeError::new_err)
+}
+
+/// Rust-only; returns Result<usize, String>. Safe inside py.detach() (no PyErr).
+fn write_record_batches_json_impl(
+    path: &str,
+    batches: &[RecordBatch],
+    lines: bool,
+    datetime_format: Option<&str>,
+) -> Result<usize, String> {
+    let file = File::create(path)
+        .map_err(|err| format!("failed to create JSON file '{path}': {err}"))?;
     let buffer = BufWriter::new(file);
-    write_json_to_writer(buffer, batches, lines, datetime_format)?;
+    write_json_to_writer_impl(buffer, batches, lines, datetime_format)?;
     Ok(batches.iter().map(RecordBatch::num_rows).sum())
 }
 
@@ -118,13 +139,24 @@ pub(crate) fn serialize_record_batches_json(
         .map_err(|err| PyRuntimeError::new_err(format!("failed to build UTF-8 JSON string: {err}")))
 }
 
+/// Returns raw bytes; use from outside detach. For use inside detach, use `serialize_record_batches_json_bytes_impl`.
 pub(crate) fn serialize_record_batches_json_bytes(
     batches: &[RecordBatch],
     lines: bool,
     datetime_format: Option<&str>,
 ) -> PyResult<Vec<u8>> {
+    serialize_record_batches_json_bytes_impl(batches, lines, datetime_format)
+        .map_err(PyRuntimeError::new_err)
+}
+
+/// Rust-only serialization (Result<Vec<u8>, String>). Safe to call inside py.detach(); do not use PyErr in closure.
+pub(crate) fn serialize_record_batches_json_bytes_impl(
+    batches: &[RecordBatch],
+    lines: bool,
+    datetime_format: Option<&str>,
+) -> Result<Vec<u8>, String> {
     let buffer = Vec::new();
-    write_json_to_writer(buffer, batches, lines, datetime_format)
+    write_json_to_writer_impl(buffer, batches, lines, datetime_format)
 }
 
 fn writer_builder(datetime_format: Option<&str>) -> WriterBuilder {
@@ -141,34 +173,37 @@ fn write_json_to_writer<W: Write>(
     lines: bool,
     datetime_format: Option<&str>,
 ) -> PyResult<W> {
+    write_json_to_writer_impl(writer, batches, lines, datetime_format)
+        .map_err(PyRuntimeError::new_err)
+}
+
+/// Rust-only; returns Result<W, String>. Safe inside py.detach() (no PyErr).
+fn write_json_to_writer_impl<W: Write>(
+    writer: W,
+    batches: &[RecordBatch],
+    lines: bool,
+    datetime_format: Option<&str>,
+) -> Result<W, String> {
     let batch_refs = batches.iter().collect::<Vec<_>>();
     let builder = writer_builder(datetime_format);
 
     if lines {
         let mut writer = builder.build::<_, LineDelimited>(writer);
         writer.write_batches(&batch_refs).map_err(|err| {
-            PyRuntimeError::new_err(format!("failed to write line-delimited JSON: {err}"))
+            format!("failed to write line-delimited JSON: {err}")
         })?;
-        writer.finish().map_err(|err| {
-            PyRuntimeError::new_err(format!("failed to finish JSON writer: {err}"))
-        })?;
+        writer.finish().map_err(|err| format!("failed to finish JSON writer: {err}"))?;
         let mut inner = writer.into_inner();
-        inner.flush().map_err(|err| {
-            PyRuntimeError::new_err(format!("failed to flush JSON output: {err}"))
-        })?;
+        inner.flush().map_err(|err| format!("failed to flush JSON output: {err}"))?;
         Ok(inner)
     } else {
         let mut writer = builder.build::<_, JsonArray>(writer);
         writer
             .write_batches(&batch_refs)
-            .map_err(|err| PyRuntimeError::new_err(format!("failed to write JSON array: {err}")))?;
-        writer.finish().map_err(|err| {
-            PyRuntimeError::new_err(format!("failed to finish JSON writer: {err}"))
-        })?;
+            .map_err(|err| format!("failed to write JSON array: {err}"))?;
+        writer.finish().map_err(|err| format!("failed to finish JSON writer: {err}"))?;
         let mut inner = writer.into_inner();
-        inner.flush().map_err(|err| {
-            PyRuntimeError::new_err(format!("failed to flush JSON output: {err}"))
-        })?;
+        inner.flush().map_err(|err| format!("failed to flush JSON output: {err}"))?;
         Ok(inner)
     }
 }

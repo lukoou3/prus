@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{BufReader, Read};
 
 use arrow_array::RecordBatch;
 use arrow_ipc::reader::StreamReader;
@@ -9,6 +9,8 @@ use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
 use pyo3_arrow::PyTable;
 
+/// Query ClickHouse and return a PyArrow Table.
+/// HTTP and stream parsing run without holding the GIL for better multithreading.
 #[pyfunction]
 #[pyo3(signature = (base_url, database, query, username="default", password=""))]
 pub fn query_clickhouse_arrow<'py>(
@@ -19,10 +21,16 @@ pub fn query_clickhouse_arrow<'py>(
     username: &str,
     password: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let query = build_arrow_stream_query(query)?;
-    let (schema, batches) = query_clickhouse_arrow_stream(
-        base_url, database, &query, username, password,
-    )?;
+    let query = build_arrow_stream_query(query).map_err(PyRuntimeError::new_err)?;
+    let base_url = base_url.to_string();
+    let database = database.to_string();
+    let username = username.to_string();
+    let password = password.to_string();
+    let (schema, batches) = py
+        .detach(|| {
+            query_clickhouse_arrow_impl(&base_url, &database, &query, &username, &password)
+        })
+        .map_err(PyRuntimeError::new_err)?;
 
     PyTable::try_new(batches, schema)?
         .into_pyarrow(py)
@@ -36,27 +44,25 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-fn build_arrow_stream_query(query: &str) -> PyResult<String> {
+fn build_arrow_stream_query(query: &str) -> Result<String, String> {
     let query = query.trim().trim_end_matches(';').trim();
     let normalized = query.to_ascii_lowercase();
     if normalized.contains(" format ") || normalized.ends_with(" format") {
-        return Err(PyRuntimeError::new_err(
-            "query should not include FORMAT; ArrowStream is appended automatically",
-        ));
+        return Err("query should not include FORMAT; ArrowStream is appended automatically".to_string());
     }
-
     Ok(format!("{query} FORMAT ArrowStream"))
 }
 
-fn query_clickhouse_arrow_stream(
+/// HTTP + stream parse. Returns Result so it can be used inside py.detach() without creating PyErr.
+/// Reads directly from the response stream (no full body Vec<u8>).
+fn query_clickhouse_arrow_impl(
     base_url: &str,
     database: &str,
     query: &str,
     username: &str,
     password: &str,
-) -> PyResult<(arrow_schema::SchemaRef, Vec<RecordBatch>)> {
+) -> Result<(arrow_schema::SchemaRef, Vec<RecordBatch>), String> {
     let base_url = base_url.trim_end_matches('/');
-    //let url = format!("{base_url}/?output_format_arrow_compression_method=none");
     let url = format!("{base_url}/");
     let credentials = format!("{username}:{password}");
     let authorization = format!(
@@ -69,30 +75,41 @@ fn query_clickhouse_arrow_stream(
         .header("X-ClickHouse-Database", database)
         .header("Accept", "application/octet-stream")
         .send(query)
-        .map_err(|err| {
-            PyRuntimeError::new_err(format!("ClickHouse HTTP request failed: {err}"))
-        })?;
+        .map_err(|err| format!("ClickHouse HTTP request failed: {err}"))?;
 
-    parse_arrow_stream(response.into_body().into_reader())
+    let reader = BufReader::new(response.into_body().into_reader());
+    parse_arrow_stream_impl(reader)
+}
+
+fn query_clickhouse_arrow_stream(
+    base_url: &str,
+    database: &str,
+    query: &str,
+    username: &str,
+    password: &str,
+) -> PyResult<(arrow_schema::SchemaRef, Vec<RecordBatch>)> {
+    query_clickhouse_arrow_impl(base_url, database, query, username, password)
+        .map_err(PyRuntimeError::new_err)
+}
+
+/// Returns Result for use inside py.detach(). Use parse_arrow_stream for PyResult (e.g. tests).
+fn parse_arrow_stream_impl<R: Read>(
+    reader: R,
+) -> Result<(arrow_schema::SchemaRef, Vec<RecordBatch>), String> {
+    let mut stream_reader = StreamReader::try_new(reader, None)
+        .map_err(|err| format!("failed to parse ClickHouse ArrowStream schema: {err}"))?;
+    let schema = stream_reader.schema();
+    let batches = stream_reader
+        .by_ref()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("failed to read ClickHouse ArrowStream batches: {err}"))?;
+    Ok((schema, batches))
 }
 
 fn parse_arrow_stream<R: Read>(
     reader: R,
 ) -> PyResult<(arrow_schema::SchemaRef, Vec<RecordBatch>)> {
-    let mut stream_reader = StreamReader::try_new(reader, None).map_err(|err| {
-        PyRuntimeError::new_err(format!("failed to parse ClickHouse ArrowStream schema: {err}"))
-    })?;
-    let schema = stream_reader.schema();
-    let batches = stream_reader
-        .by_ref()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| {
-            PyRuntimeError::new_err(format!(
-                "failed to read ClickHouse ArrowStream batches: {err}"
-            ))
-        })?;
-
-    Ok((schema, batches))
+    parse_arrow_stream_impl(reader).map_err(PyRuntimeError::new_err)
 }
 
 #[cfg(test)]
