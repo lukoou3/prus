@@ -18,32 +18,33 @@ use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
 use pyo3_arrow::{PySchema, PyTable};
 use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::ClientConfig;
+use rdkafka::{ClientConfig, Message};
 
-const DEFAULT_MAX_MESSAGES: usize = 100_000;
-const DEFAULT_MAX_DURATION_SECS: u64 = 30;
+const DEFAULT_MAX_MESSAGES: usize = 500_000;
+const DEFAULT_MAX_DURATION_SECS: u64 = 180;
+static POLL_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[pyfunction]
 #[pyo3(signature = (
     brokers,
-    topics,
+    topic,
     mode="raw",
-    max_messages=None,
-    max_duration_seconds=None,
+    max_messages=500_000,
+    max_duration_seconds=180,
     schema=None,
     properties=None
 ))]
 pub fn read_kafka_to_arrow<'py>(
     py: Python<'py>,
     brokers: &str,
-    topics: &Bound<'_, PyAny>,
+    topic: &str,
     mode: &str,
     max_messages: Option<usize>,
-    max_duration_seconds: Option<f64>,
+    max_duration_seconds: Option<u64>,
     schema: Option<&Bound<'_, PyAny>>,
     properties: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let topics = py_list_to_strings(topics)?;
+    let topic = topic.to_string();
     let schema_ref = schema.map(resolve_schema).transpose()?;
     let properties_vec = properties.map(py_dict_to_properties).transpose()?;
     let brokers = brokers.to_string();
@@ -52,7 +53,7 @@ pub fn read_kafka_to_arrow<'py>(
         .detach(|| {
             read_kafka_to_arrow_impl(
                 &brokers,
-                topics.as_slice(),
+                &topic,
                 &mode,
                 max_messages,
                 max_duration_seconds,
@@ -78,7 +79,7 @@ fn resolve_schema(schema: &Bound<'_, PyAny>) -> PyResult<Arc<Schema>> {
 fn py_dict_to_properties(d: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String)>> {
     let dict = d.downcast::<pyo3::types::PyDict>()?;
     let mut out = Vec::with_capacity(dict.len());
-    for (k, v) in dict.iter()? {
+    for (k, v) in dict.iter() {
         let key = k.extract::<String>()?;
         let val = v.extract::<String>()?;
         out.push((key, val));
@@ -87,9 +88,9 @@ fn py_dict_to_properties(d: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String)>
 }
 
 fn py_schema_to_pairs(schema: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String)>> {
-    let list = schema.downcast::<pyo3::types::PyList>()?;
+    let list: &Bound<'_, pyo3::types::PyList>  = schema.cast()?;
     let mut out = Vec::with_capacity(list.len());
-    for item in list.iter()? {
+    for item in list.iter() {
         let tup = item.downcast::<pyo3::types::PyTuple>()?;
         if tup.len() != 2 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -105,12 +106,12 @@ fn py_schema_to_pairs(schema: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String
 
 fn py_list_to_strings(topics: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     if let Ok(s) = topics.downcast::<pyo3::types::PyString>() {
-        return Ok(vec![s.to_string()?]);
+        return Ok(vec![s.to_string()]);
     }
     let list = topics.downcast::<pyo3::types::PyList>()?;
     let mut out = Vec::with_capacity(list.len());
-    for item in list.iter()? {
-        let s = item.downcast::<pyo3::types::PyString>()?.to_string()?;
+    for item in list.iter() {
+        let s = item.downcast::<pyo3::types::PyString>()?.to_string();
         out.push(s);
     }
     Ok(out)
@@ -118,23 +119,21 @@ fn py_list_to_strings(topics: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
 
 fn read_kafka_to_arrow_impl(
     brokers: &str,
-    topics: &[String],
+    topic: &str,
     mode: &str,
     max_messages: Option<usize>,
-    max_duration_seconds: Option<f64>,
+    max_duration_seconds: Option<u64>,
     schema: Option<&Arc<Schema>>,
     properties: Option<&[(String, String)]>,
 ) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
     let max_msgs = max_messages.unwrap_or(DEFAULT_MAX_MESSAGES);
     let max_dur = max_duration_seconds
-        .map(Duration::from_secs_f64)
+        .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(DEFAULT_MAX_DURATION_SECS));
 
     let mut config = ClientConfig::new();
     config.set("bootstrap.servers", brokers);
     config.set("group.id", format!("prus-kafka-{}", uuid_simple()));
-    config.set("auto.offset.reset", "earliest");
-    config.set("enable.auto.commit", "false");
     if let Some(props) = properties {
         for (k, v) in props {
             config.set(k, v);
@@ -144,34 +143,62 @@ fn read_kafka_to_arrow_impl(
         .create()
         .map_err(|e| format!("Kafka consumer creation failed: {e}"))?;
 
-    let topic_refs: Vec<&str> = topics.iter().map(String::as_str).collect();
+    let topic_refs: Vec<&str> = vec![topic];
     consumer
         .subscribe(&topic_refs)
         .map_err(|e| format!("Kafka subscribe failed: {e}"))?;
 
-    let mut messages: Vec<Vec<u8>> = Vec::new();
     let deadline = Instant::now() + max_dur;
-    let poll_timeout = Duration::from_millis(500);
-
-    while messages.len() < max_msgs && Instant::now() < deadline {
-        match consumer.poll(poll_timeout) {
-            None => continue,
-            Some(Ok(m)) => {
-                if let Some(payload) = m.payload() {
-                    messages.push(payload.to_vec());
-                }
-            }
-            Some(Err(e)) => return Err(format!("Kafka poll error: {e}")),
-        }
-    }
+    let mut empty_cnt = 0;
 
     match mode {
-        "raw" => build_raw_batches(messages),
+        "raw" => {
+            let mut messages: Vec<String> = Vec::new();
+            while messages.len() < max_msgs && Instant::now() < deadline {
+                match consumer.poll(POLL_TIMEOUT) {
+                    None => {
+                        empty_cnt += 1;
+                        if empty_cnt > 50 {
+                            break;
+                        }
+                    },
+                    Some(Ok(m)) => {
+                        empty_cnt = 0;
+                        if let Some(payload) = m.payload() {
+                            messages.push(String::from_utf8_lossy(payload).to_string());
+                        }
+                    }
+                    Some(Err(e)) => return Err(format!("Kafka poll error: {e}")),
+                }
+            }
+            build_raw_batches(messages)
+        },
         "json" => {
             let s = schema
                 .ok_or("json mode requires schema (PyArrow schema or list of (name, type_str))")?
                 .clone();
-            build_json_batches_with_schema(messages, s)
+            let mut bytes: Vec<u8> = Vec::new();
+            let mut msgs = 0;
+            while msgs < max_msgs && Instant::now() < deadline {
+                msgs += 1;
+                match consumer.poll(POLL_TIMEOUT) {
+                    None => {
+                        empty_cnt += 1;
+                        if empty_cnt > 50 {
+                            break;
+                        }
+                    },
+                    Some(Ok(m)) => {
+                        empty_cnt = 0;
+                        if let Some(payload) = m.payload() {
+                            bytes.extend_from_slice(payload);
+                            bytes.push(b'\n');
+                        }
+                    }
+                    Some(Err(e)) => return Err(format!("Kafka poll error: {e}")),
+                }
+            }
+            build_json_batches_with_schema(bytes, s)
         }
         _ => Err(format!("mode must be 'raw' or 'json', got '{mode}'")),
     }
@@ -185,30 +212,23 @@ fn uuid_simple() -> u64 {
         .as_nanos() as u64
 }
 
-fn build_raw_batches(messages: Vec<Vec<u8>>) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
+fn build_raw_batches(messages: Vec<String>) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
     let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
-    let values: Vec<Option<String>> = messages
-        .into_iter()
-        .map(|b| String::from_utf8(b).ok())
-        .collect();
-    let arr = StringArray::from(values);
+    let arr = StringArray::from(messages);
     let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr)])
         .map_err(|e| format!("RecordBatch build failed: {e}"))?;
     Ok((schema, vec![batch]))
 }
 
 fn build_json_batches_with_schema(
-    messages: Vec<Vec<u8>>,
+    bytes: Vec<u8>,
     schema: Arc<Schema>,
 ) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
-    if messages.is_empty() {
+    if bytes.is_empty() {
         return Ok((schema, vec![]));
     }
-    let mut ndjson = messages.join(&b'\n');
-    ndjson.push(b'\n');
-    let bytes = ndjson;
 
-    let cursor = Cursor::new(bytes);
+    let cursor = Cursor::new(&bytes);
     let mut reader = ReaderBuilder::new(schema.clone())
         .build(BufReader::new(cursor))
         .map_err(|e| format!("JSON reader build failed: {e}"))?;
@@ -238,13 +258,13 @@ fn parse_type_str(s: &str) -> Result<DataType, String> {
         "bool" | "boolean" => DataType::Boolean,
         "int8" => DataType::Int8,
         "int16" => DataType::Int16,
-        "int32" => DataType::Int32,
-        "int64" => DataType::Int64,
+        "int32" | "int" => DataType::Int32,
+        "int64" | "long" => DataType::Int64,
         "uint8" => DataType::UInt8,
         "uint16" => DataType::UInt16,
-        "uint32" => DataType::UInt32,
-        "uint64" => DataType::UInt64,
-        "float32" => DataType::Float32,
+        "uint32" | "uint" => DataType::UInt32,
+        "uint64" | "ulong" => DataType::UInt64,
+        "float32" | "float" => DataType::Float32,
         "float64" | "double" => DataType::Float64,
         "utf8" | "string" => DataType::Utf8,
         "large_utf8" => DataType::LargeUtf8,
@@ -264,4 +284,49 @@ fn parse_type_str(s: &str) -> Result<DataType, String> {
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(read_kafka_to_arrow, module)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_read_kafka_to_arrow_mode_raw() {
+        let (schema, batches) = read_kafka_to_arrow_impl(
+            "localhost:9092",
+            "logs",
+            "raw",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        println!("schema: {:?}", schema);
+        for batch in batches {
+            println!("batch: {:?}", batch);
+        }
+    }
+
+    #[test]
+    fn test_read_kafka_to_arrow_mode_json() {
+        let in_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let (schema, batches) = read_kafka_to_arrow_impl(
+            "localhost:9092",
+            "logs",
+            "json",
+            None,
+            None,
+            Some(&in_schema),
+            None,
+        )
+        .unwrap();
+        println!("schema: {:?}", schema);
+        for batch in batches {
+            println!("batch: {:?}", batch);
+        }
+    }
 }
