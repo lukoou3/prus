@@ -10,7 +10,29 @@ use pyo3::wrap_pyfunction;
 use pyo3_arrow::PyTable;
 
 /// Query ClickHouse and return a PyArrow Table.
+///
+/// Uses HTTP interface with ArrowStream format for efficient data transfer.
 /// HTTP and stream parsing run without holding the GIL for better multithreading.
+///
+/// Args:
+///     base_url: ClickHouse HTTP endpoint (e.g., "http://localhost:8123")
+///     database: Database name to query
+///     query: SQL query (FORMAT clause is automatically appended as "FORMAT ArrowStream")
+///     username: ClickHouse username (default: "default")
+///     password: ClickHouse password (default: "")
+///
+/// Returns:
+///     PyArrow Table containing the query results
+///
+/// Raises:
+///     RuntimeError: If query contains FORMAT clause or HTTP request fails
+///
+/// Examples:
+///     >>> import prus
+///     >>> # Simple query
+///     >>> table = prus.query_clickhouse_arrow("http://localhost:8123", "my_db", "SELECT * FROM events LIMIT 1000")
+///     >>> # With authentication
+///     >>> table = prus.query_clickhouse_arrow("http://localhost:8123", "my_db", "SELECT count()", "admin", "secret")
 #[pyfunction]
 #[pyo3(signature = (base_url, database, query, username="default", password=""))]
 pub fn query_clickhouse_arrow<'py>(

@@ -9,6 +9,32 @@ use ureq::Agent;
 use ureq::config::Config;
 use crate::json_writer::{extract_record_batches, serialize_record_batches_json_bytes_impl};
 
+/// Write PyArrow data to ClickHouse table.
+///
+/// Uses HTTP interface with JSONEachRow format for efficient bulk insert.
+/// Serialization and HTTP request run without holding the GIL for better multithreading.
+///
+/// Args:
+///     data: PyArrow RecordBatch or Table to write
+///     base_url: ClickHouse HTTP endpoint (e.g., "http://localhost:8123")
+///     database: Database name
+///     table: Target table name
+///     username: ClickHouse username (default: "default")
+///     password: ClickHouse password (default: "")
+///     datetime_format: Optional datetime format string (default: "%Y-%m-%d %H:%M:%S")
+///
+/// Returns:
+///     Number of rows written to ClickHouse
+///
+/// Raises:
+///     RuntimeError: If HTTP request fails or table name is empty
+///
+/// Examples:
+///     >>> import prus
+///     >>> import pyarrow as pa
+///     >>> table = pa.table({"id": [1, 2, 3], "name": ["a", "b", "c"]})
+///     >>> rows = prus.write_arrow_to_clickhouse(table, "http://localhost:8123", "my_db", "my_table")
+///     3
 #[pyfunction]
 #[pyo3(signature = (data, base_url, database, table, username="default", password="", datetime_format=None))]
 pub fn write_arrow_to_clickhouse(

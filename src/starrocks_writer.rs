@@ -10,6 +10,35 @@ use ureq::Agent;
 
 use crate::json_writer::{extract_record_batches, serialize_record_batches_json_bytes_impl};
 
+/// Write PyArrow data to StarRocks table using Stream Load API.
+///
+/// Uses StarRocks Stream Load with JSON format for efficient bulk insert.
+/// Automatically handles FE to BE redirects.
+/// Serialization and HTTP request run without holding the GIL for better multithreading.
+///
+/// Args:
+///     data: PyArrow RecordBatch or Table to write
+///     base_url: StarRocks HTTP endpoint (e.g., "http://localhost:8030")
+///     database: Database name
+///     table: Target table name
+///     username: StarRocks username (default: "root")
+///     password: StarRocks password (default: "")
+///     datetime_format: Optional datetime format string (default: "%Y-%m-%d %H:%M:%S")
+///     label: Optional Stream Load label for idempotency and tracking
+///
+/// Returns:
+///     StarRocks Stream Load response as JSON string
+///
+/// Raises:
+///     RuntimeError: If HTTP request fails or StarRocks returns error status
+///
+/// Examples:
+///     >>> import prus
+///     >>> import pyarrow as pa
+///     >>> table = pa.table({"id": [1, 2, 3], "name": ["a", "b", "c"]})
+///     >>> response = prus.write_arrow_to_starrocks(table, "http://localhost:8030", "my_db", "my_table")
+///     >>> # With label for idempotency
+///     >>> response = prus.write_arrow_to_starrocks(table, "http://localhost:8030", "my_db", "my_table", label="load-2024-01-01")
 #[pyfunction]
 #[pyo3(signature = (data, base_url, database, table, username="root", password="", datetime_format=None, label=None))]
 pub fn write_arrow_to_starrocks(

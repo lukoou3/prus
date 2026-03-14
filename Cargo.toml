@@ -8,7 +8,7 @@ name = "prus"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28.2", features = ["extension-module"] }
+pyo3 = { version = "0.28.2"}
 pyo3-arrow = "0.16.0"
 arrow = { version = "57.3.0"}
 arrow-json = "57.3.0"

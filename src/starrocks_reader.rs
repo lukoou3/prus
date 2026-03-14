@@ -587,7 +587,30 @@ fn query_starrocks_arrow_impl(
 }
 
 /// Query StarRocks and return a PyArrow Table.
-/// HTTP and parsing run without holding the GIL, so multiple threads can run queries in parallel.
+///
+/// Uses HTTP interface with NDJSON format. Streams response and parses directly into Arrow builders
+/// without intermediate JSON objects for better memory efficiency.
+/// HTTP and parsing run without holding the GIL for better multithreading.
+///
+/// Args:
+///     base_url: StarRocks HTTP endpoint (e.g., "http://localhost:8030")
+///     database: Database name to query
+///     query: SQL query
+///     username: StarRocks username (default: "root")
+///     password: StarRocks password (default: "")
+///     catalog: Catalog name (default: "default_catalog")
+///
+/// Returns:
+///     PyArrow Table containing the query results
+///
+/// Raises:
+///     RuntimeError: If HTTP request fails or JSON parsing fails
+///
+/// Examples:
+///     >>> import prus
+///     >>> table = prus.query_starrocks_arrow("http://localhost:8030", "my_db", "SELECT * FROM events LIMIT 1000")
+///     >>> # With authentication
+///     >>> table = prus.query_starrocks_arrow("http://localhost:8030", "my_db", "SELECT count()", "admin", "secret")
 #[pyfunction]
 #[pyo3(signature = (base_url, database, query, username="root", password="", catalog="default_catalog"))]
 pub fn query_starrocks_arrow<'py>(

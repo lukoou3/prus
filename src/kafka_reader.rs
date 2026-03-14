@@ -24,6 +24,33 @@ const DEFAULT_MAX_MESSAGES: usize = 500_000;
 const DEFAULT_MAX_DURATION_SECS: u64 = 180;
 static POLL_TIMEOUT: Duration = Duration::from_millis(200);
 
+/// Read Kafka messages into a PyArrow Table.
+///
+/// Supports two modes:
+/// - "raw": One column "value" (utf8), one row per message. No schema required.
+/// - "json": NDJSON per message, parsed with arrow_json. Schema is required.
+///
+/// Args:
+///     brokers: Kafka bootstrap servers (e.g., "localhost:9092")
+///     topic: Kafka topic name to consume from
+///     mode: Read mode, either "raw" or "json" (default: "raw")
+///     max_messages: Maximum number of messages to read (default: 500,000)
+///     max_duration_seconds: Maximum duration in seconds to poll (default: 180)
+///     schema: Required for "json" mode. Can be PyArrow schema (pa.schema([...])) or list of (name, type_str) tuples.
+///              Supported type_str: bool/int8/int16/int32/int64/uint8/uint16/uint32/uint64/float32/float64/utf8/date32/date64/timestamp_ms/timestamp_us
+///     properties: Optional dict of Kafka consumer config (e.g., {"group.id": "my-group", "auto.offset.reset": "earliest"})
+///
+/// Returns:
+///     PyArrow Table containing the consumed messages
+///
+/// Examples:
+///     >>> import prus
+///     >>> import pyarrow as pa
+///     >>> # Raw mode - read as strings
+///     >>> table = prus.read_kafka_to_arrow("localhost:9092", "logs", mode="raw", max_messages=100)
+///     >>> # JSON mode - parse structured data
+///     >>> schema = pa.schema([("id", "int64"), ("name", "utf8"), ("timestamp", "timestamp_ms")])
+///     >>> table = prus.read_kafka_to_arrow("localhost:9092", "events", mode="json", schema=schema)
 #[pyfunction]
 #[pyo3(signature = (
     brokers,

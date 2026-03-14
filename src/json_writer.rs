@@ -8,6 +8,30 @@ use pyo3_arrow::{PyRecordBatch, PyTable};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
+/// Write PyArrow data to a JSON file.
+///
+/// Args:
+///     data: PyArrow RecordBatch or Table to write
+///     path: Output file path
+///     lines: If True, write as NDJSON (one JSON object per line). If False, write as JSON array (default: True)
+///     datetime_format: Optional datetime format string (default: "%Y-%m-%d %H:%M:%S")
+///
+/// Returns:
+///     Number of rows written
+///
+/// Raises:
+///     RuntimeError: If file creation or serialization fails
+///
+/// Examples:
+///     >>> import prus
+///     >>> import pyarrow as pa
+///     >>> table = pa.table({"id": [1, 2], "name": ["a", "b"]})
+///     >>> # Write as NDJSON
+///     >>> prus.write_arrow_json(table, "output.json", lines=True)
+///     2
+///     >>> # Write as JSON array
+///     >>> prus.write_arrow_json(table, "output.json", lines=False)
+///     2
 #[pyfunction]
 #[pyo3(signature = (data, path, lines=true, datetime_format=None))]
 pub fn write_arrow_json(
@@ -24,6 +48,24 @@ pub fn write_arrow_json(
         .map_err(PyRuntimeError::new_err)
 }
 
+/// Write PyArrow data to a file in NDJSON format (one JSON object per line).
+///
+/// This is a convenience function equivalent to write_arrow_json(data, path, lines=True).
+///
+/// Args:
+///     data: PyArrow RecordBatch or Table to write
+///     path: Output file path
+///     datetime_format: Optional datetime format string (default: "%Y-%m-%d %H:%M:%S")
+///
+/// Returns:
+///     Number of rows written
+///
+/// Examples:
+///     >>> import prus
+///     >>> import pyarrow as pa
+///     >>> table = pa.table({"id": [1, 2], "name": ["a", "b"]})
+///     >>> prus.write_arrow_ndjson(table, "output.json")
+///     2
 #[pyfunction]
 #[pyo3(signature = (data, path, datetime_format=None))]
 pub fn write_arrow_ndjson(
@@ -34,6 +76,24 @@ pub fn write_arrow_ndjson(
     write_arrow_json(data, path, true, datetime_format)
 }
 
+/// Write PyArrow data to a file as JSON array.
+///
+/// This is a convenience function equivalent to write_arrow_json(data, path, lines=False).
+///
+/// Args:
+///     data: PyArrow RecordBatch or Table to write
+///     path: Output file path
+///     datetime_format: Optional datetime format string (default: "%Y-%m-%d %H:%M:%S")
+///
+/// Returns:
+///     Number of rows written
+///
+/// Examples:
+///     >>> import prus
+///     >>> import pyarrow as pa
+///     >>> table = pa.table({"id": [1, 2], "name": ["a", "b"]})
+///     >>> prus.write_arrow_json_array(table, "output.json")
+///     2
 #[pyfunction]
 #[pyo3(signature = (data, path, datetime_format=None))]
 pub fn write_arrow_json_array(
@@ -44,6 +104,32 @@ pub fn write_arrow_json_array(
     write_arrow_json(data, path, false, datetime_format)
 }
 
+/// Serialize PyArrow data to JSON string.
+///
+/// Args:
+///     data: PyArrow RecordBatch or Table to serialize
+///     lines: If True, return NDJSON (one JSON object per line). If False, return JSON array (default: True)
+///     datetime_format: Optional datetime format string (default: "%Y-%m-%d %H:%M:%S")
+///
+/// Returns:
+///     JSON string
+///
+/// Raises:
+///     RuntimeError: If serialization fails
+///
+/// Examples:
+///     >>> import prus
+///     >>> import pyarrow as pa
+///     >>> table = pa.table({"id": [1, 2], "name": ["a", "b"]})
+///     >>> # Serialize as NDJSON
+///     >>> json_str = prus.dumps_arrow_json(table, lines=True)
+///     >>> print(json_str)
+///     {"id":1,"name":"a"}
+///     {"id":2,"name":"b"}
+///     >>> # Serialize as JSON array
+///     >>> json_str = prus.dumps_arrow_json(table, lines=False)
+///     >>> print(json_str)
+///     [{"id":1,"name":"a"},{"id":2,"name":"b"}]
 #[pyfunction]
 #[pyo3(signature = (data, lines=true, datetime_format=None))]
 pub fn dumps_arrow_json(
@@ -62,6 +148,25 @@ pub fn dumps_arrow_json(
         .map_err(PyRuntimeError::new_err)
 }
 
+/// Serialize PyArrow data to NDJSON string (one JSON object per line).
+///
+/// This is a convenience function equivalent to dumps_arrow_json(data, lines=True).
+///
+/// Args:
+///     data: PyArrow RecordBatch or Table to serialize
+///     datetime_format: Optional datetime format string (default: "%Y-%m-%d %H:%M:%S")
+///
+/// Returns:
+///     NDJSON string
+///
+/// Examples:
+///     >>> import prus
+///     >>> import pyarrow as pa
+///     >>> table = pa.table({"id": [1, 2], "name": ["a", "b"]})
+///     >>> json_str = prus.dumps_arrow_ndjson(table)
+///     >>> print(json_str)
+///     {"id":1,"name":"a"}
+///     {"id":2,"name":"b"}
 #[pyfunction]
 #[pyo3(signature = (data, datetime_format=None))]
 pub fn dumps_arrow_ndjson(
@@ -71,6 +176,24 @@ pub fn dumps_arrow_ndjson(
     dumps_arrow_json(data, true, datetime_format)
 }
 
+/// Serialize PyArrow data to JSON array string.
+///
+/// This is a convenience function equivalent to dumps_arrow_json(data, lines=False).
+///
+/// Args:
+///     data: PyArrow RecordBatch or Table to serialize
+///     datetime_format: Optional datetime format string (default: "%Y-%m-%d %H:%M:%S")
+///
+/// Returns:
+///     JSON array string
+///
+/// Examples:
+///     >>> import prus
+///     >>> import pyarrow as pa
+///     >>> table = pa.table({"id": [1, 2], "name": ["a", "b"]})
+///     >>> json_str = prus.dumps_arrow_json_array(table)
+///     >>> print(json_str)
+///     [{"id":1,"name":"a"},{"id":2,"name":"b"}]
 #[pyfunction]
 #[pyo3(signature = (data, datetime_format=None))]
 pub fn dumps_arrow_json_array(
