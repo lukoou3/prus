@@ -20,7 +20,9 @@ ureq = { version = "3.2", features = ["json", "gzip", "charset"] }
 serde_json = "1.0.138"
 base64 = "0.22"
 chrono = "0.4.39"
+# windows中不会启用snappy, https://github.com/fede1024/rust-rdkafka/pull/586, https://github.com/fede1024/rust-rdkafka/issues/637
 [target.'cfg(target_os = "windows")'.dependencies]
-rdkafka = { version = "0.37.0", features = ["cmake-build"]}
+rdkafka = { git = "https://github.com/lukoou3/rust-rdkafka.git", branch = "master", features = ["cmake-build"]}
 [target.'cfg(target_os = "linux")'.dependencies]
-rdkafka = { version = "0.37.0", features = ["cmake-build", "sasl"]}
+rdkafka = { git = "https://github.com/lukoou3/rust-rdkafka.git", branch = "master", features = ["cmake-build", "sasl"]}
+# rdkafka = { version = "0.39.0", features = ["cmake-build", "sasl"]}

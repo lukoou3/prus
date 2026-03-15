@@ -3,7 +3,7 @@
 //! - raw: Arrow must have exactly one column of type Utf8/LargeUtf8 or Binary/LargeBinary
 
 use std::sync::Arc;
-
+use std::time::Duration;
 use arrow::datatypes::DataType;
 use arrow_json::writer::{make_encoder, EncoderOptions};
 use arrow_array::{Array, LargeStringArray, RecordBatch, StringArray, StructArray};
@@ -301,7 +301,7 @@ fn write_raw_mode(
         total_rows += rows;
     }
 
-    producer.flush(None).map_err(|e| format!("Kafka flush failed: {e}"))?;
+    producer.flush(Duration::from_secs(10)).map_err(|e| format!("Kafka flush failed: {e}"))?;
     Ok(total_rows)
 }
 
@@ -393,7 +393,11 @@ mod tests {
     #[ignore = "requires a reachable Kafka instance"]
     fn live_kafka_write_raw_mode() {
         let batch = build_string_batch();
-        let producer = create_kafka_producer("localhost:9092", None).unwrap();
+        let properties = vec![
+            ("compression.type".to_string(), "snappy".to_string()),
+            //("compression.type".to_string(), "lz4".to_string()),
+        ];
+        let producer = create_kafka_producer("localhost:9092", Some(&properties)).unwrap();
         let rows = write_raw_mode(&producer, "test-raw-topic", &[batch]).unwrap();
         assert_eq!(rows, 4);
     }

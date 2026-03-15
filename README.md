@@ -431,6 +431,7 @@ pip install maturin
 
 # Build the Python extension
 maturin develop
+maturin develop --release
 ```
 
 Run tests:
