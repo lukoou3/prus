@@ -96,6 +96,15 @@ table = prus.read_kafka_to_arrow(
     properties={"group.id": "my-group", "auto.offset.reset": "earliest"}
 )
 
+# Read from Kafka (raw mode) with SASL_PLAINTEXT
+table = prus.read_kafka_to_arrow(
+    "localhost:9094",
+    "my_topic",
+    mode="raw",
+    max_messages=1000,
+    properties= {"security.protocol": "SASL_PLAINTEXT", "sasl.mechanisms": "SCRAM-SHA-256", "sasl.username": "xxx", "sasl.password": "xxx"}
+)
+
 # Write to Kafka (JSON mode)
 table = pa.table({"id": [1, 2], "name": ["a", "b"]})
 rows = prus.write_arrow_to_kafka(
@@ -258,7 +267,9 @@ read_kafka_to_arrow(
     max_messages: int | None = None,
     max_duration_seconds: int | None = None,
     schema: pyarrow.Schema | list[tuple] | None = None,
-    properties: dict | None = None
+    properties: dict | None = None,
+    start_timestamp_ms: int | None = None,
+    include_metadata: bool = False
 ) -> pyarrow.Table
 ```
 
@@ -270,7 +281,9 @@ read_kafka_to_arrow(
 - `max_duration_seconds`: Maximum duration in seconds to poll (default: 180)
 - `schema`: Required for "json" mode. Can be PyArrow schema or list of (name, type_str) tuples.
   Supported type_str: bool/int8/int16/int32/int64/uint8/uint16/uint32/uint64/float32/float64/utf8/date32/date64/timestamp_ms/timestamp_us
-- `properties`: Optional dict of Kafka consumer config (e.g., {"group.id": "my-group"})
+- `properties`: Optional dict of Kafka consumer config (e.g., {"group.id": "my-group", "auto.offset.reset": "earliest"}, {"security.protocol": "SASL_PLAINTEXT", "sasl.mechanisms": "SCRAM-SHA-256", "sasl.username": "xx", "sasl.password": "xx"})
+- `start_timestamp_ms`: Optional timestamp (in milliseconds) to start consuming from. If set, will seek to the earliest offset at or after this timestamp.
+- `include_metadata`: Whether to include Kafka metadata columns (partition_id, offset, timestamp) (default: False)
 
 **Returns:** PyArrow Table containing the consumed messages
 

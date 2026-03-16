@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow_array::{RecordBatch, StringArray};
+use arrow_array::{ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow_json::reader::ReaderBuilder;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -18,6 +18,7 @@ use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
 use pyo3_arrow::{PySchema, PyTable};
 use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::topic_partition_list::TopicPartitionList;
 use rdkafka::{ClientConfig, Message};
 
 const DEFAULT_MAX_MESSAGES: usize = 500_000;
@@ -38,7 +39,9 @@ static POLL_TIMEOUT: Duration = Duration::from_millis(200);
 ///     max_duration_seconds: Maximum duration in seconds to poll (default: 180)
 ///     schema: Required for "json" mode. Can be PyArrow schema (pa.schema([...])) or list of (name, type_str) tuples.
 ///              Supported type_str: bool/int8/int16/int32/int64/uint8/uint16/uint32/uint64/float32/float64/utf8/date32/date64/timestamp_ms/timestamp_us
-///     properties: Optional dict of Kafka consumer config (e.g., {"group.id": "my-group", "auto.offset.reset": "earliest"})
+///     properties: Optional dict of Kafka consumer config (e.g., {"group.id": "my-group", "auto.offset.reset": "earliest"}, {"security.protocol": "SASL_PLAINTEXT", "sasl.mechanisms": "SCRAM-SHA-256", "sasl.username": "xx", "sasl.password": "xx"})
+///     start_timestamp_ms: Optional timestamp (in milliseconds) to start consuming from. If set, will seek to the earliest offset at or after this timestamp.
+///     include_metadata: Whether to include Kafka metadata columns (partition_id, offset, timestamp) (default: false)
 ///
 /// Returns:
 ///     PyArrow Table containing the consumed messages
@@ -51,6 +54,12 @@ static POLL_TIMEOUT: Duration = Duration::from_millis(200);
 ///     >>> # JSON mode - parse structured data
 ///     >>> schema = pa.schema([("id", "int64"), ("name", "utf8"), ("timestamp", "timestamp_ms")])
 ///     >>> table = prus.read_kafka_to_arrow("localhost:9092", "events", mode="json", schema=schema)
+///     >>> # Start from specific timestamp (e.g., 1 hour ago)
+///     >>> import time
+///     >>> timestamp_ms = int(time.time() * 1000) - 3600000
+///     >>> table = prus.read_kafka_to_arrow("localhost:9092", "logs", start_timestamp_ms=timestamp_ms)
+///     >>> # Include metadata columns
+///     >>> table = prus.read_kafka_to_arrow("localhost:9092", "logs", include_metadata=True)
 #[pyfunction]
 #[pyo3(signature = (
     brokers,
@@ -59,7 +68,9 @@ static POLL_TIMEOUT: Duration = Duration::from_millis(200);
     max_messages=500_000,
     max_duration_seconds=180,
     schema=None,
-    properties=None
+    properties=None,
+    start_timestamp_ms=None,
+    include_metadata=false
 ))]
 pub fn read_kafka_to_arrow<'py>(
     py: Python<'py>,
@@ -70,6 +81,8 @@ pub fn read_kafka_to_arrow<'py>(
     max_duration_seconds: Option<u64>,
     schema: Option<&Bound<'_, PyAny>>,
     properties: Option<&Bound<'_, PyAny>>,
+    start_timestamp_ms: Option<i64>,
+    include_metadata: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let topic = topic.to_string();
     let schema_ref = schema.map(resolve_schema).transpose()?;
@@ -86,6 +99,8 @@ pub fn read_kafka_to_arrow<'py>(
                 max_duration_seconds,
                 schema_ref.as_ref(),
                 properties_vec.as_deref(),
+                start_timestamp_ms,
+                include_metadata,
             )
         })
         .map_err(PyRuntimeError::new_err)?;
@@ -152,6 +167,8 @@ fn read_kafka_to_arrow_impl(
     max_duration_seconds: Option<u64>,
     schema: Option<&Arc<Schema>>,
     properties: Option<&[(String, String)]>,
+    start_timestamp_ms: Option<i64>,
+    include_metadata: bool,
 ) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
     let max_msgs = max_messages.unwrap_or(DEFAULT_MAX_MESSAGES);
     let max_dur = max_duration_seconds
@@ -161,6 +178,7 @@ fn read_kafka_to_arrow_impl(
     let mut config = ClientConfig::new();
     config.set("bootstrap.servers", brokers);
     config.set("group.id", format!("prus-kafka-{}", uuid_simple()));
+    config.set("enable.auto.commit", "false");
     if let Some(props) = properties {
         for (k, v) in props {
             config.set(k, v);
@@ -170,10 +188,49 @@ fn read_kafka_to_arrow_impl(
         .create()
         .map_err(|e| format!("Kafka consumer creation failed: {e}"))?;
 
-    let topic_refs: Vec<&str> = vec![topic];
-    consumer
-        .subscribe(&topic_refs)
-        .map_err(|e| format!("Kafka subscribe failed: {e}"))?;
+    let metadata = consumer
+        .fetch_metadata(Some(topic), Duration::from_secs(10))
+        .map_err(|e| format!("Failed to fetch metadata: {e}"))?;
+
+
+    let partitions = if let Some(t) = metadata.topics().iter().find(|t| t.name() == topic) {
+        t.partitions()
+    } else {
+        return Err(format!("not find topic:{}", topic))
+    };
+    if partitions.is_empty() {
+        return Err(format!("Topic {} has no partitions", topic));
+    }
+
+
+
+    if let Some(ts) = start_timestamp_ms {
+        let mut tpl = TopicPartitionList::new();
+        for partition in partitions {
+            tpl.add_partition_offset(topic, partition.id(), rdkafka::Offset::Offset(ts)).map_err(|e| format!("Failed to set partition offset: {e}"))?;
+        }
+        let offsets = consumer.offsets_for_times(tpl, Duration::from_secs(10)).map_err(|e| format!("Failed to get offsets for times: {e}"))?;
+        let mut tpl = TopicPartitionList::new();
+        for elem in offsets.elements() {
+            if let Some(offset) = elem.offset().to_raw() {
+                tpl.add_partition_offset(topic, elem.partition(), rdkafka::Offset::Offset(offset)).map_err(|e| format!("Failed to set partition offset: {e}"))?;
+            } else {
+                tpl.add_partition(topic, elem.partition());
+            }
+        }
+
+        consumer
+            .assign(&offsets)
+            .map_err(|e| format!("Kafka assign failed: {e}"))?;
+    } else {
+        let mut tpl = TopicPartitionList::new();
+        for partition in partitions {
+            tpl.add_partition(topic, partition.id());
+        }
+        consumer
+            .assign(&tpl)
+            .map_err(|e| format!("Kafka assign failed: {e}"))?;
+    }
 
     let deadline = Instant::now() + max_dur;
     let mut empty_cnt = 0;
@@ -181,6 +238,10 @@ fn read_kafka_to_arrow_impl(
     match mode {
         "raw" => {
             let mut messages: Vec<String> = Vec::new();
+            let mut partition_ids: Vec<i32> = Vec::new();
+            let mut offsets: Vec<i64> = Vec::new();
+            let mut timestamps: Vec<Option<i64>> = Vec::new();
+            
             while messages.len() < max_msgs && Instant::now() < deadline {
                 match consumer.poll(POLL_TIMEOUT) {
                     None => {
@@ -193,18 +254,26 @@ fn read_kafka_to_arrow_impl(
                         empty_cnt = 0;
                         if let Some(payload) = m.payload() {
                             messages.push(String::from_utf8_lossy(payload).to_string());
+                            if include_metadata {
+                                partition_ids.push(m.partition() as i32);
+                                offsets.push(m.offset() as i64);
+                                timestamps.push(m.timestamp().to_millis());
+                            }
                         }
                     }
                     Some(Err(e)) => return Err(format!("Kafka poll error: {e}")),
                 }
             }
-            build_raw_batches(messages)
+            build_raw_batches(messages, include_metadata, partition_ids, offsets, timestamps)
         },
         "json" => {
             let s = schema
                 .ok_or("json mode requires schema (PyArrow schema or list of (name, type_str))")?
                 .clone();
             let mut bytes: Vec<u8> = Vec::new();
+            let mut partition_ids: Vec<i32> = Vec::new();
+            let mut offsets: Vec<i64> = Vec::new();
+            let mut timestamps: Vec<Option<i64>> = Vec::new();
             let mut msgs = 0;
             while msgs < max_msgs && Instant::now() < deadline {
                 msgs += 1;
@@ -220,12 +289,17 @@ fn read_kafka_to_arrow_impl(
                         if let Some(payload) = m.payload() {
                             bytes.extend_from_slice(payload);
                             bytes.push(b'\n');
+                            if include_metadata {
+                                partition_ids.push(m.partition());
+                                offsets.push(m.offset());
+                                timestamps.push(m.timestamp().to_millis());
+                            }
                         }
                     }
                     Some(Err(e)) => return Err(format!("Kafka poll error: {e}")),
                 }
             }
-            build_json_batches_with_schema(bytes, s)
+            build_json_batches_with_schema(bytes, s, include_metadata, partition_ids, offsets, timestamps)
         }
         _ => Err(format!("mode must be 'raw' or 'json', got '{mode}'")),
     }
@@ -239,10 +313,34 @@ fn uuid_simple() -> u64 {
         .as_nanos() as u64
 }
 
-fn build_raw_batches(messages: Vec<String>) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
-    let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
-    let arr = StringArray::from(messages);
-    let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr)])
+fn build_raw_batches(
+    messages: Vec<String>,
+    include_metadata: bool,
+    partition_ids: Vec<i32>,
+    offsets: Vec<i64>,
+    timestamps: Vec<Option<i64>>,
+) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
+    let mut fields = vec![Field::new("value", DataType::Utf8, true)];
+    
+    if include_metadata {
+        fields.extend(vec![
+            Field::new("kafka_partition_id", DataType::Int32, false),
+            Field::new("kafka_offset", DataType::Int64, false),
+            Field::new("kafka_timestamp", DataType::Int64, true),
+        ]);
+    }
+    
+    let schema = Arc::new(Schema::new(fields));
+    
+    let mut arrays: Vec<ArrayRef> = vec![Arc::new(StringArray::from(messages)) ];
+    
+    if include_metadata {
+        arrays.push(Arc::new(Int32Array::from(partition_ids)));
+        arrays.push(Arc::new(Int64Array::from(offsets)));
+        arrays.push(Arc::new(Int64Array::from(timestamps)));
+    }
+    
+    let batch = RecordBatch::try_new(schema.clone(), arrays)
         .map_err(|e| format!("RecordBatch build failed: {e}"))?;
     Ok((schema, vec![batch]))
 }
@@ -250,22 +348,73 @@ fn build_raw_batches(messages: Vec<String>) -> Result<(Arc<Schema>, Vec<RecordBa
 fn build_json_batches_with_schema(
     bytes: Vec<u8>,
     schema: Arc<Schema>,
+    include_metadata: bool,
+    partition_ids: Vec<i32>,
+    offsets: Vec<i64>,
+    timestamps: Vec<Option<i64>>,
 ) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
+    let new_schema = if include_metadata {
+        let mut fields: Vec<_> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+        fields.push(Field::new("kafka_partition_id", DataType::Int32, false));
+        fields.push(Field::new("kafka_offset", DataType::Int64, false));
+        fields.push(Field::new("kafka_timestamp", DataType::Int64, true));
+        Arc::new(Schema::new(fields))
+    } else {
+        schema.clone()
+    };
     if bytes.is_empty() {
-        return Ok((schema, vec![]));
+        return  Ok((new_schema, vec![]));
     }
 
     let cursor = Cursor::new(&bytes);
     let mut reader = ReaderBuilder::new(schema.clone())
+        .with_coerce_primitive(true).with_batch_size(8192)
         .build(BufReader::new(cursor))
         .map_err(|e| format!("JSON reader build failed: {e}"))?;
 
     let mut batches = Vec::new();
+    let mut start_row = 0;
+    let mut end_row = 0;
     while let Some(batch_result) = reader.next() {
-        let batch = batch_result.map_err(|e| format!("JSON read failed: {e}"))?;
+        let mut batch = batch_result.map_err(|e| format!("JSON read failed: {e}"))?;
+        start_row = end_row;
+        end_row = start_row + batch.num_rows();
+
+        if include_metadata {
+            if start_row == 0 && end_row == partition_ids.len() {
+                batch = add_metadata_to_batch(batch, new_schema.clone(), partition_ids, offsets, timestamps)
+                    .map_err(|e| format!("Failed to add metadata: {e}"))?;
+                batches.push(batch);
+                break;
+            } else {
+                batch = add_metadata_to_batch(batch, new_schema.clone(), partition_ids[start_row.. end_row].to_vec(), offsets[start_row.. end_row].to_vec(), timestamps[start_row.. end_row].to_vec())
+                    .map_err(|e| format!("Failed to add metadata: {e}"))?;
+            }
+        }
+        
         batches.push(batch);
     }
-    Ok((schema, batches))
+
+    
+    Ok((new_schema, batches))
+}
+
+fn add_metadata_to_batch(
+    batch: RecordBatch,
+    new_schema: Arc<Schema>,
+    partition_ids: Vec<i32> ,
+    offsets: Vec<i64>,
+    timestamps: Vec<Option<i64>>,
+) -> Result<RecordBatch, String> {
+    let mut arrays = batch.columns().to_vec();
+
+    arrays.push(Arc::new(Int32Array::from(partition_ids)));
+    arrays.push(Arc::new(Int64Array::from(offsets)));
+    arrays.push(Arc::new(Int64Array::from(timestamps)));
+
+    
+    RecordBatch::try_new(new_schema, arrays)
+        .map_err(|e| format!("Failed to create batch with metadata: {e}"))
 }
 
 fn build_schema_from_hint(pairs: &[(String, String)]) -> Result<Arc<Schema>, String> {
@@ -320,15 +469,37 @@ mod tests {
     #[test]
     fn test_read_kafka_to_arrow_mode_raw() {
         let (schema, batches) = read_kafka_to_arrow_impl(
-            "localhost:9092",
+            "localhost:9092", // localhost:9092
             "logs",
             "raw",
             None,
             None,
             None,
             None,
+            None,
+            false
         )
         .unwrap();
+        println!("schema: {:?}", schema);
+        for batch in batches {
+            println!("batch: {:?}", batch);
+        }
+    }
+
+    #[test]
+    fn test_read_kafka_to_arrow_mode_raw_set_params() {
+        let (schema, batches) = read_kafka_to_arrow_impl(
+            "192.168.44.12:9092", // localhost:9092
+            "logs",
+            "raw",
+            None,
+            Some(10),
+            None,
+            None,
+            Some(1773632690000),
+            true
+        )
+            .unwrap();
         println!("schema: {:?}", schema);
         for batch in batches {
             println!("batch: {:?}", batch);
@@ -349,6 +520,8 @@ mod tests {
             None,
             Some(&in_schema),
             None,
+            None,
+            false
         )
         .unwrap();
         println!("schema: {:?}", schema);
@@ -356,4 +529,37 @@ mod tests {
             println!("batch: {:?}", batch);
         }
     }
+
+    #[test]
+    fn test_read_kafka_to_arrow_mode_json_set_params() {
+        let in_schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp_ms", DataType::Int64, true),
+            Field::new("timestamp", DataType::Utf8, true),
+            Field::new("cate", DataType::Utf8, true),
+        ]));
+        // windows环境搞不定，很难搞
+        /*let properties = vec![
+            ("security.protocol".to_string(), "SASL_PLAINTEXT".to_string()),
+            ("sasl.mechanisms".to_string(), "SCRAM-SHA-256".to_string()),
+            ("sasl.username".to_string(), "xxx".to_string()),
+            ("sasl.password".to_string(), "xxx".to_string()),
+        ];*/
+        let (schema, batches) = read_kafka_to_arrow_impl(
+            "192.168.44.12:9092", // localhost:9092
+            "logs",
+            "json",
+            None,
+            Some(10),
+            Some(&in_schema),
+            None, //Some(&properties),
+            Some(1773632690000),
+            true
+        )
+            .unwrap();
+        println!("schema: {:?}", schema);
+        for batch in batches {
+            println!("batch: {:?}", batch);
+        }
+    }
+
 }
