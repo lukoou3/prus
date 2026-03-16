@@ -122,6 +122,25 @@ rows = prus.write_arrow_to_kafka(
     "my_topic",
     mode="raw"
 )
+
+# Kafka Tools
+
+# Get topic information
+topic_info = prus.get_kafka_topic_info("localhost:9092", "my_topic")
+print(topic_info)
+
+# Get consumer group information
+group_info = prus.get_kafka_group_info("localhost:9092", "my_topic", "my-group")
+print(group_info)
+
+# Reset group offset to latest
+reset_result = prus.reset_kafka_group_offset_latest("localhost:9092", "my_topic", "my-group")
+print(reset_result)
+
+# Reset group offset to specific timestamp
+timestamp_ms = int(time.time() * 1000) - 3600000  # 1 hour ago
+reset_result = prus.reset_kafka_group_offset_for_ts("localhost:9092", "my_topic", "my-group", timestamp_ms)
+print(reset_result)
 ```
 
 ### JSON Export
@@ -311,6 +330,90 @@ write_arrow_to_kafka(
 - `datetime_format`: Optional datetime format string for JSON mode (default: "%Y-%m-%d %H:%M:%S")
 
 **Returns:** Number of rows written to Kafka
+
+#### `get_kafka_topic_info`
+
+Get Kafka topic information including partitions and their offsets.
+
+```python
+get_kafka_topic_info(
+    brokers: str,
+    topic: str,
+    properties: dict | None = None
+) -> dict
+```
+
+**Parameters:**
+- `brokers`: Kafka bootstrap servers (e.g., "localhost:9092")
+- `topic`: Kafka topic name
+- `properties`: Optional dict of Kafka consumer config
+
+**Returns:** Dict with topic information, including partitions and their offsets
+
+#### `get_kafka_group_info`
+
+Get Kafka consumer group information including offsets and lag.
+
+```python
+get_kafka_group_info(
+    brokers: str,
+    topic: str,
+    group_id: str,
+    properties: dict | None = None
+) -> dict
+```
+
+**Parameters:**
+- `brokers`: Kafka bootstrap servers (e.g., "localhost:9092")
+- `topic`: Kafka topic name
+- `group_id`: Consumer group ID
+- `properties`: Optional dict of Kafka consumer config
+
+**Returns:** Dict with group information, including partitions, offsets, and lag
+
+#### `reset_kafka_group_offset_latest`
+
+Reset Kafka consumer group offset to latest (high watermark).
+
+```python
+reset_kafka_group_offset_latest(
+    brokers: str,
+    topic: str,
+    group_id: str,
+    properties: dict | None = None
+) -> dict
+```
+
+**Parameters:**
+- `brokers`: Kafka bootstrap servers (e.g., "localhost:9092")
+- `topic`: Kafka topic name
+- `group_id`: Consumer group ID
+- `properties`: Optional dict of Kafka consumer config
+
+**Returns:** Dict with reset status
+
+#### `reset_kafka_group_offset_for_ts`
+
+Reset Kafka consumer group offset to specific timestamp.
+
+```python
+reset_kafka_group_offset_for_ts(
+    brokers: str,
+    topic: str,
+    group_id: str,
+    timestamp_ms: int,
+    properties: dict | None = None
+) -> dict
+```
+
+**Parameters:**
+- `brokers`: Kafka bootstrap servers (e.g., "localhost:9092")
+- `topic`: Kafka topic name
+- `group_id`: Consumer group ID
+- `timestamp_ms`: Timestamp in milliseconds
+- `properties`: Optional dict of Kafka consumer config
+
+**Returns:** Dict with reset status and offset information
 
 ### JSON Export
 

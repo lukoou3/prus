@@ -5,6 +5,7 @@ mod clickhouse_writer;
 mod json_writer;
 mod kafka_reader;
 mod kafka_writer;
+mod kafka_tools;
 mod starrocks_reader;
 mod starrocks_writer;
 
@@ -15,6 +16,7 @@ fn prus(module: &Bound<'_, PyModule>) -> PyResult<()> {
     json_writer::register(module)?;
     kafka_reader::register(module)?;
     kafka_writer::register(module)?;
+    kafka_tools::register(module)?;
     starrocks_reader::register(module)?;
     starrocks_writer::register(module)?;
     Ok(())
