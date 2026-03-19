@@ -106,7 +106,7 @@ fn execute_insert(
     let mut response_body = String::new();
     reader
         .read_to_string(&mut response_body)
-        .map_err(|err| format!("failed to read ClickHouse insert response: {err}"))?;
+        .map_err(|err| format!("failed to read http response: {err}"))?;
     if status != 200 {
         return Err(format!(
             "ClickHouse insert failed with status {status}: {response_body}"

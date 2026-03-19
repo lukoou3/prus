@@ -101,7 +101,7 @@ fn stream_load_json(
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(credentials)
     );
-    let agent: Agent = Agent::config_builder().max_redirects(0).build().into();
+    let agent: Agent = Agent::config_builder().http_status_as_error(false).max_redirects(0).build().into();
 
     let response = send_stream_load_request(
         &agent,
@@ -175,11 +175,18 @@ fn send_stream_load_request(
         return Ok(StreamLoadResponse::Redirect(redirect_url));
     }
 
+    let status = response.status().as_u16();
     let mut reader = response.into_body().into_reader();
     let mut response_body = String::new();
     reader
         .read_to_string(&mut response_body)
-        .map_err(|err| format!("failed to read StarRocks stream load response: {err}"))?;
+        .map_err(|err| format!("failed to read http response: {err}"))?;
+    if status != 200 {
+        return Err(format!(
+            "StarRocks load failed with status {status}: {response_body}"
+        ));
+    }
+
     Ok(StreamLoadResponse::Completed(response_body))
 }
 

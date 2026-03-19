@@ -8,6 +8,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
 use pyo3_arrow::PyTable;
+use ureq::Agent;
+use ureq::config::Config;
 
 /// Query ClickHouse and return a PyArrow Table.
 ///
@@ -92,13 +94,24 @@ fn query_clickhouse_arrow_impl(
         base64::engine::general_purpose::STANDARD.encode(credentials)
     );
 
-    let response = ureq::post(&url)
+    let agent = Agent::new_with_config(Config::builder().http_status_as_error(false).build());
+    let response = agent.post(&url)
         .header("Authorization", &authorization)
         .header("X-ClickHouse-Database", database)
         .header("Accept", "application/octet-stream")
         .send(query)
         .map_err(|err| format!("ClickHouse HTTP request failed: {err}"))?;
-
+    let status = response.status().as_u16();
+    if status != 200 {
+        let mut response_body = String::new();
+        response.into_body().into_reader()
+            .read_to_string(&mut response_body)
+            .map_err(|err| format!("failed to read http response: {err}"))?;
+        return Err(format!(
+            "ClickHouse query failed with status {status}: {response_body}"
+        ));
+    }
+    
     let reader = BufReader::new(response.into_body().into_reader());
     parse_arrow_stream_impl(reader)
 }

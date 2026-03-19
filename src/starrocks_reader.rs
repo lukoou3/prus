@@ -1,6 +1,6 @@
 //! StarRocks query: stream NDJSON into Arrow column builders (no intermediate Vec<Vec<Value>>).
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::sync::Arc;
 
 use arrow::buffer::{BooleanBuffer, NullBuffer, OffsetBuffer};
@@ -18,6 +18,8 @@ use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
 use pyo3_arrow::PyTable;
 use serde_json::{Value, json};
+use ureq::Agent;
+use ureq::config::Config;
 
 #[derive(Debug, Clone)]
 struct StarRocksColumn {
@@ -578,10 +580,23 @@ fn query_starrocks_arrow_impl(
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(credentials)
     );
-    let response = ureq::post(&url)
+
+    let agent = Agent::new_with_config(Config::builder().http_status_as_error(false).build());
+    let response = agent.post(&url)
         .header("Authorization", &authorization)
         .send_json(json!({ "query": query }))
         .map_err(|e| format!("StarRocks HTTP request failed: {e}"))?;
+    let status = response.status().as_u16();
+    if status != 200 {
+        let mut response_body = String::new();
+        response.into_body().into_reader()
+            .read_to_string(&mut response_body)
+            .map_err(|err| format!("failed to read http response: {err}"))?;
+        return Err(format!(
+            "StarRocks query failed with status {status}: {response_body}"
+        ));
+    }
+    
     let reader = BufReader::new(response.into_body().into_reader());
     parse_starrocks_response_impl(reader)
 }
