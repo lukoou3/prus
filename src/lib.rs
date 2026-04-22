@@ -8,6 +8,7 @@ mod kafka_writer;
 mod kafka_tools;
 mod starrocks_reader;
 mod starrocks_writer;
+mod faker;
 
 #[pymodule]
 fn prus(module: &Bound<'_, PyModule>) -> PyResult<()> {
