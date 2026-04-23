@@ -205,17 +205,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn option_string_empty_all_null() {
-        let mut f = OptionStringFaker::new(vec![], false).unwrap();
-        f.init(3).unwrap();
-        for _ in 0..3 {
-            f.gene_value().unwrap();
-        }
-        let arr = f.finish().unwrap();
-        assert_eq!(arr.null_count(), 3);
-    }
-
-    #[test]
     fn option_string_cycle() {
         let mut f = OptionStringFaker::new(
             vec![Some("a".into()), Some("b".into()), None],

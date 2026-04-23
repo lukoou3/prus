@@ -1,6 +1,7 @@
 mod number;
 mod string;
 mod complex;
+mod timestamp;
 
 use std::fmt::Debug;
 use std::sync::Arc;

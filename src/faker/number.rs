@@ -117,8 +117,37 @@ impl FakerConfig for DoubleFakerConfig {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct SequenceFakerConfig {
+    #[serde(default)]
+    start: i64,
+    #[serde(default = "default_sequence_step")]
+    step: i64,
+    #[serde(default = "default_sequence_batch")]
+    batch: u32,
+    #[serde(flatten, default)]
+    wrap_config: WrapConfig,
+}
+
+#[typetag::serde(name = "sequence")]
+impl FakerConfig for SequenceFakerConfig {
+    fn build(&self) -> anyhow::Result<Box<dyn Faker>> {
+        let faker = Box::new(SequenceFaker::new(self.start, self.step, self.batch));
+        Ok(wrap_faker_necessary(faker, &self.wrap_config))
+    }
+
+}
+
 fn default_random() -> bool {
     true
+}
+
+fn default_sequence_step() -> i64 {
+    1
+}
+
+fn default_sequence_batch() -> u32 {
+    1
 }
 
 /// Picks from a fixed list of optional values (null = explicit `None` in the list).
@@ -338,6 +367,58 @@ impl_range_integer_faker!(RangeBigintFaker, i64, DataType::Int64, Int64Builder);
 impl_range_float_faker!(RangeFloatFaker, f32, DataType::Float32, Float32Builder);
 impl_range_float_faker!(RangeDoubleFaker, f64, DataType::Float64, Float64Builder);
 
+#[derive(Debug)]
+pub struct SequenceFaker {
+    start: i64,
+    step: i64,
+    batch: u32,
+    cnt: u32,
+    value: i64,
+    builder: Int64Builder,
+}
+
+impl SequenceFaker {
+    pub fn new(start: i64, step: i64, batch: u32) -> Self {
+        Self {start, step, batch, cnt: 0, value: start, builder: Int64Builder::with_capacity(0)}
+    }
+}
+
+impl Faker for SequenceFaker {
+    fn data_type(&self) -> DataType {
+        DataType::Int64
+    }
+
+    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
+        self.cnt = 0;
+        self.value = self.start;
+        self.builder = Int64Builder::with_capacity(capacity);
+        Ok(())
+    }
+
+    fn gene_value(&mut self) -> anyhow::Result<()> {
+        self.builder.append_value(self.value);
+        self.cnt += 1;
+        if self.cnt >= self.batch {
+            self.cnt = 0;
+            self.value += self.step;
+        }
+        Ok(())
+    }
+
+    fn gene_null(&mut self) -> anyhow::Result<()> {
+        self.builder.append_null();
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.builder.len()
+    }
+
+    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
+        Ok(Arc::new(self.builder.finish()))
+    }
+}
+
 mod test {
     use arrow_array::Array;
     use arrow_array::cast::AsArray;
@@ -456,5 +537,17 @@ mod test {
         let array = faker.finish().unwrap();
         let arr = array.as_primitive::<Float64Type>();
         assert!(arr.values().iter().all(|&v| (0.0..4.0).contains(&v)));
+    }
+
+    #[test]
+    fn sequence_faker() {
+        let mut faker = SequenceFaker::new(0, 1, 3);
+        faker.init(10).unwrap();
+        for _ in 0..10 {
+            faker.gene_value().unwrap();
+        }
+        let array = faker.finish().unwrap();
+        let arr = array.as_primitive::<Int64Type>();
+        assert_eq!(arr.values(), &[0, 0, 0, 1, 1, 1, 2, 2, 2, 3]);
     }
 }
