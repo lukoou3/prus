@@ -1,0 +1,194 @@
+use std::sync::Arc;
+use arrow::array::NullBufferBuilder;
+use arrow::buffer::{Buffer, OffsetBuffer};
+use arrow_array::{ArrayRef, ListArray};
+use arrow_schema::{DataType, Field};
+use rand::Rng;
+use crate::faker::Faker;
+
+#[derive(Debug)]
+pub struct ArrayFaker {
+    ele_faker: Box<dyn Faker>,
+    array_len_min: i32,
+    array_len_max: i32,
+    offsets_builder: Vec<i32>,
+    null_buffer_builder: NullBufferBuilder,
+}
+
+impl ArrayFaker {
+    pub fn new(ele_faker: Box<dyn Faker>, array_len_min: i32, array_len_max: i32) -> Self {
+        ArrayFaker {
+            ele_faker,
+            array_len_min,
+            array_len_max,
+            offsets_builder: vec![],
+            null_buffer_builder: NullBufferBuilder::new(0),
+        }
+    }
+}
+
+impl Faker for ArrayFaker {
+    fn data_type(&self) -> DataType {
+        DataType::new_list(self.ele_faker.data_type(), true)
+    }
+
+    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
+        self.ele_faker.init(capacity)?;
+        self.offsets_builder = Vec::with_capacity(capacity + 1);
+        self.offsets_builder.push(0);
+        self.null_buffer_builder = NullBufferBuilder::new(capacity);
+        Ok(())
+    }
+
+    fn gene_value(&mut self) -> anyhow::Result<()> {
+        let len = rand::rng().random_range(self.array_len_min..=self.array_len_max);
+        for _ in 0..len {
+            self.ele_faker.gene_value()?;
+        }
+        self.offsets_builder.push(self.ele_faker.len() as i32);
+        self.null_buffer_builder.append(true);
+        Ok(())
+    }
+
+    fn gene_null(&mut self) -> anyhow::Result<()> {
+        self.offsets_builder.push(self.ele_faker.len() as i32);
+        self.null_buffer_builder.append(false);
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.offsets_builder.len()
+    }
+
+    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
+        let offsets = Buffer::from_vec(std::mem::take(&mut self.offsets_builder));
+        // Safety: Safe by construction
+        let offsets = unsafe { OffsetBuffer::new_unchecked(offsets.into()) };
+        Ok(Arc::new(ListArray::new(
+            Arc::new(Field::new_list_field(self.ele_faker.data_type(), true)),
+            offsets,
+            self.ele_faker.finish()?,
+            self.null_buffer_builder.finish(),
+        )))
+    }
+}
+
+/// Wraps a child faker so each `gene_value` becomes a null with probability `null_rate`,
+/// otherwise delegates to the child’s `gene_value`. `gene_null` always forwards to the child.
+#[derive(Debug)]
+pub struct NullAbleFaker {
+    ele_faker: Box<dyn Faker>,
+    null_rate: f32,
+}
+
+impl NullAbleFaker {
+    pub fn new(ele_faker: Box<dyn Faker>, null_rate: f32) -> Self {
+        Self {
+            ele_faker,
+            null_rate: if null_rate.is_finite() {
+                null_rate.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+        }
+    }
+}
+
+impl Faker for NullAbleFaker {
+    fn data_type(&self) -> DataType {
+        self.ele_faker.data_type()
+    }
+
+    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
+        self.ele_faker.init(capacity)
+    }
+
+    fn gene_value(&mut self) -> anyhow::Result<()> {
+        if rand::rng().random_range(0.0f32..1.0f32) < self.null_rate {
+            self.ele_faker.gene_null()
+        } else {
+            self.ele_faker.gene_value()
+        }
+    }
+
+    fn gene_null(&mut self) -> anyhow::Result<()> {
+        self.ele_faker.gene_null()
+    }
+
+    fn len(&self) -> usize {
+        self.ele_faker.len()
+    }
+
+    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
+        self.ele_faker.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow_array::Array;
+    use arrow_array::cast::AsArray;
+
+    use crate::faker::{OptionIntFaker, RangeIntFaker};
+    use super::*;
+
+    #[test]
+    fn test_array_faker() {
+        let mut faker = ArrayFaker::new(Box::new(OptionIntFaker::new(vec![Some(1), Some(2), Some(3), None], true).unwrap()), 1, 5);
+        faker.init(10).unwrap();
+        for _ in 0..10 {
+            faker.gene_value().unwrap();
+        }
+        let array = faker.finish().unwrap();
+        println!("{}", array.len());
+        println!("{:?}", array);
+    }
+
+    #[test]
+    fn null_able_all_nulls_when_rate_one() {
+        let mut faker = NullAbleFaker::new(
+            Box::new(RangeIntFaker::new(1, 100, false).unwrap()),
+            1.0,
+        );
+        faker.init(20).unwrap();
+        for _ in 0..20 {
+            faker.gene_value().unwrap();
+        }
+        let array = faker.finish().unwrap();
+        assert_eq!(array.len(), 20);
+        assert_eq!(array.null_count(), 20);
+    }
+
+    #[test]
+    fn null_able_no_random_null_when_rate_zero() {
+        let mut faker = NullAbleFaker::new(
+            Box::new(RangeIntFaker::new(7, 8, false).unwrap()),
+            0.0,
+        );
+        faker.init(5).unwrap();
+        for _ in 0..5 {
+            faker.gene_value().unwrap();
+        }
+        let array = faker.finish().unwrap();
+        assert_eq!(array.null_count(), 0);
+        assert!(array
+            .as_primitive::<arrow_array::types::Int32Type>()
+            .values()
+            .iter()
+            .all(|&v| v == 7));
+    }
+
+    #[test]
+    fn null_able_gene_null_delegates() {
+        let mut faker = NullAbleFaker::new(
+            Box::new(RangeIntFaker::new(1, 10, true).unwrap()),
+            0.0,
+        );
+        faker.init(2).unwrap();
+        faker.gene_null().unwrap();
+        faker.gene_value().unwrap();
+        let array = faker.finish().unwrap();
+        assert_eq!(array.len(), 2);
+        assert_eq!(array.null_count(), 1);
+    }
+}

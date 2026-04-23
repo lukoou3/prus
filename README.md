@@ -1,13 +1,14 @@
 # prus
 
-High-performance Python extension for data I/O with ClickHouse, StarRocks, and Kafka. Built with Rust and Apache Arrow for zero-copy data transfer.
+High-performance Python extension for data I/O with ClickHouse, StarRocks, and optional Kafka. Built with Rust and Apache Arrow for zero-copy data transfer. Includes a small **Faker** module to synthesize PyArrow `RecordBatch` data from JSON field configs (useful for tests and benchmarks).
 
 ## Features
 
 - **ClickHouse**: Query and write data via HTTP interface with ArrowStream format
 - **StarRocks**: Query and write data via Stream Load API
-- **Kafka**: Read and write messages with JSON or raw mode
+- **Kafka** (optional build): Read and write messages with JSON or raw mode (enable with `--features kafka` when building from source)
 - **JSON**: Serialize Arrow data to NDJSON or JSON array format
+- **Faker**: Generate a PyArrow `RecordBatch` from a JSON description of per-column generators (`int`, `bigint`, `float`, `double`, ranges, option lists, null/array wrappers)
 - **Zero-copy**: All operations use Apache Arrow for efficient memory usage
 - **GIL-free**: I/O and serialization release the Python GIL for better multithreading
 
@@ -69,6 +70,8 @@ print(response)
 ```
 
 ### Kafka
+
+When installing from source, Kafka APIs require building with **`--features kafka`** (see Development). Prebuilt wheels may or may not include Kafka depending on how they were published.
 
 ```python
 import prus
@@ -161,6 +164,28 @@ prus.write_arrow_json_array(table, "output.json")
 json_str = prus.dumps_arrow_ndjson(table)
 print(json_str)
 ```
+
+### Faker (synthetic RecordBatch)
+
+Describe each column as a JSON object (a **JSON array** of such objects). Every object has a **`name`** column label and a **`type`** discriminator (`int`, `bigint`, `float`, `double`). Remaining keys are flattened on the same object (same pattern as `serde` internally tagged configs).
+
+- **`int` / `bigint`**: Either set **`options`** to a JSON array of values (optional `null` entries) to cycle or sample from a list, or leave `options` empty and use half-open integer range **`min`..`max`** with **`random`** (sequential vs uniform). Optional wrappers: **`null_rate`**, **`array`** (with **`array_len_min`** / **`array_len_max`**, **`array_item_null_rate`**).
+- **`float` / `double`**: With empty **`options`**, values are uniform in **`[min, max)`**. With **`options`**, use **`random`** for list mode. Same optional wrapper fields as above.
+
+```python
+import json
+import prus
+
+cfg = [
+    {"name": "id", "type": "int", "min": 0, "max": 3, "random": False},
+    {"name": "score", "type": "float", "min": 0.0, "max": 1.0},
+    {"name": "label", "type": "int", "options": [10, 20], "random": False, "min": 0, "max": 1},
+]
+batch = prus.fake_arrow_record_batch_from_json(json.dumps(cfg), num_rows=100)
+# batch is a pyarrow.RecordBatch
+```
+
+Heavy generation runs **without holding the GIL** (same pattern as other CPU-bound entry points). Invalid JSON or inconsistent configs raise **`RuntimeError`**.
 
 ## API Reference
 
@@ -529,6 +554,27 @@ dumps_arrow_json_array(
 
 **Returns:** JSON array string
 
+### Faker
+
+#### `fake_arrow_record_batch_from_json`
+
+Build a PyArrow `RecordBatch` from a JSON string describing each column’s faker.
+
+```python
+fake_arrow_record_batch_from_json(
+    field_configs_json: str,
+    num_rows: int,
+) -> pyarrow.RecordBatch
+```
+
+**Parameters:**
+- `field_configs_json`: UTF-8 JSON **array** of per-field objects. Each object must include **`name`** (Arrow field name) and **`type`** (`int`, `bigint`, `float`, or `double`). Other keys depend on `type` (e.g. `min`, `max`, `random`, `options`, and optional `null_rate` / `array` / `array_len_min` / `array_len_max` / `array_item_null_rate` for wrappers).
+- `num_rows`: Number of logical rows to generate. Each row runs all column fakers in order, so row `i` is built from the `i`-th draw of every column.
+
+**Returns:** A `pyarrow.RecordBatch` with nullable columns (`null` bitmaps may be all-valid depending on generators).
+
+**Raises:** `RuntimeError` if JSON is malformed or batch construction fails.
+
 ## Performance Tips
 
 1. **Batch operations**: Process multiple rows in a single Arrow Table for better performance
@@ -547,7 +593,8 @@ pip install maturin
 
 # Build the Python extension
 maturin develop
-maturin develop --release
+# Optional: Kafka client (requires CMake / librdkafka toolchain)
+maturin develop --features kafka
 ```
 
 Run tests:

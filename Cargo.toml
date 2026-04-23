@@ -7,6 +7,11 @@ edition = "2024"
 name = "prus"
 crate-type = ["cdylib"]
 
+[features]
+# Default build: no Kafka (avoids rdkafka / librdkafka native toolchain).
+default = []
+kafka = ["dep:rdkafka"]
+
 [dependencies]
 pyo3 = { version = "0.28.2"}
 pyo3-arrow = "0.16.0"
@@ -17,13 +22,18 @@ arrow-ipc = { version = "57.3.0", features = ["lz4"] }
 arrow-schema = "57.3.0"
 anyhow = "1.0.102"
 ureq = { version = "3.2", features = ["json", "gzip", "charset"] }
-#serde = { version = "1.0.194", features = ["derive"] }
+serde = { version = "1.0.194", features = ["derive"] }
 serde_json = "1.0.138"
+typetag = "0.2"
+rand = "0.9.0"
+rand_regex = "0.18.0"
+regex-syntax = {version = "0.8.5", features = ["unicode"]}
 base64 = "0.22"
 chrono = "0.4.39"
+
 # windows中不会启用snappy, https://github.com/fede1024/rust-rdkafka/pull/586, https://github.com/fede1024/rust-rdkafka/issues/637
 [target.'cfg(target_os = "windows")'.dependencies]
-rdkafka = { git = "https://github.com/lukoou3/rust-rdkafka.git", branch = "master", features = ["cmake-build"]}
+rdkafka = { git = "https://github.com/lukoou3/rust-rdkafka.git", branch = "master", features = ["cmake-build"], optional = true}
 [target.'cfg(target_os = "linux")'.dependencies]
-rdkafka = { git = "https://github.com/lukoou3/rust-rdkafka.git", branch = "master", features = ["cmake-build", "gssapi-vendored"]}
+rdkafka = { git = "https://github.com/lukoou3/rust-rdkafka.git", branch = "master", features = ["cmake-build", "gssapi-vendored"], optional = true}
 # rdkafka = { version = "0.39.0", features = ["cmake-build", "sasl"]}
