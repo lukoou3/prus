@@ -10,6 +10,45 @@ use serde::{Deserialize, Serialize};
 
 use super::{wrap_faker_necessary, Faker, FakerConfig, WrapConfig};
 
+#[derive(Debug, Serialize, Deserialize)]
+struct StringFakerConfig {
+    #[serde(default = "default_regex")]
+    regex: String,
+    #[serde(default)]
+    chars: String,
+    #[serde(default)]
+    len: usize,
+    #[serde(default)]
+    options: Vec<Option<String>>,
+    #[serde(default = "default_random")]
+    random: bool,
+    #[serde(flatten, default)]
+    array_config: WrapConfig,
+}
+
+#[typetag::serde(name = "string")]
+impl FakerConfig for StringFakerConfig {
+    fn build(&self) -> anyhow::Result<Box<dyn Faker>> {
+        let faker: Box<dyn Faker> = if !self.options.is_empty() {
+            Box::new(OptionStringFaker::new(self.options.clone(), self.random)?)
+        } else if !self.chars.is_empty() {
+            Box::new(CharsStringFaker::new(self.chars.chars().collect(), self.len)?)
+        } else {
+            Box::new(RegexStringFaker::new(self.regex.clone())?)
+        };
+        Ok(wrap_faker_necessary(faker, &self.array_config))
+    }
+}
+
+fn default_regex() -> String {
+    "[a-zA-Z]{0,5}".to_string()
+}
+
+fn default_random() -> bool {
+    true
+}
+
+
 /// Picks from a fixed list of optional strings (`None` in the list = explicit null row).
 #[derive(Debug)]
 pub struct OptionStringFaker {
@@ -145,9 +184,9 @@ pub struct RegexStringFaker {
 }
 
 impl RegexStringFaker {
-    pub fn new(pattern: impl Into<String>, max_repeat: u32) -> anyhow::Result<Self> {
+    pub fn new(pattern: impl Into<String>) -> anyhow::Result<Self> {
         let pattern = pattern.into();
-        let dist = compile_rand_regex(&pattern, max_repeat)?;
+        let dist = compile_rand_regex(&pattern, 4)?;
         Ok(Self {
             dist,
             rng: StdRng::seed_from_u64(42),
@@ -240,7 +279,7 @@ mod tests {
 
     #[test]
     fn regex_string_digits() {
-        let mut f = RegexStringFaker::new(r"\d{3}-\d{2}", 32).unwrap();
+        let mut f = RegexStringFaker::new(r"\d{3}-\d{2}").unwrap();
         f.init(5).unwrap();
         for _ in 0..5 {
             f.gene_value().unwrap();

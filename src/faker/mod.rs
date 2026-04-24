@@ -2,6 +2,7 @@ mod number;
 mod string;
 mod complex;
 mod timestamp;
+mod internet;
 
 use std::fmt::Debug;
 use std::sync::Arc;
