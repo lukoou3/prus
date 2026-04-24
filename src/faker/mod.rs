@@ -4,12 +4,15 @@ mod complex;
 mod timestamp;
 mod internet;
 
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use anyhow::Result;
+use arrow::array::NullBufferBuilder;
 use arrow_array::{ArrayRef, RecordBatch};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_array::builder::{ArrayBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder, TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder};
+use arrow_schema::{DataType, Field, Fields, Schema, TimeUnit};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -21,18 +24,245 @@ pub use number::*;
 pub use string::*;
 pub use complex::*;
 
+enum DataBuilder {
+    Int32(Int32Builder),
+    Int64(Int64Builder),
+    Float32(Float32Builder),
+    Float64(Float64Builder),
+    String(StringBuilder),
+    Boolean(BooleanBuilder),
+    TimestampSeconds(TimestampSecondBuilder),
+    TimestampMillis(TimestampMillisecondBuilder),
+    TimestampMicros(TimestampMicrosecondBuilder),
+    TimestampNanos(TimestampNanosecondBuilder),
+    List {
+        item_type: DataType,
+        item_builder: Box<DataBuilder>,
+        offsets_builder: Vec<i32>,
+        null_buffer_builder: NullBufferBuilder,
+    },
+    Struct {
+        fields: Fields,
+        field_builders: Vec<DataBuilder>,
+        null_buffer_builder: NullBufferBuilder,
+    },
+}
+
+impl DataBuilder {
+    fn append_default_value(&mut self) {
+        match self {
+            DataBuilder::Int32(builder) => builder.append_value(0),
+            DataBuilder::Int64(builder) => builder.append_value(0),
+            DataBuilder::Float32(builder) => builder.append_value(0.0),
+            DataBuilder::Float64(builder) => builder.append_value(0.0),
+            DataBuilder::String(builder) => builder.append_value(""),
+            DataBuilder::Boolean(builder) => builder.append_value(false),
+            DataBuilder::TimestampSeconds(builder) => builder.append_value(0),
+            DataBuilder::TimestampMillis(builder) => builder.append_value(0),
+            DataBuilder::TimestampMicros(builder) => builder.append_value(0),
+            DataBuilder::TimestampNanos(builder) => builder.append_value(0),
+            DataBuilder::List { item_type, item_builder, offsets_builder, null_buffer_builder, } => {
+                offsets_builder.push(item_builder.len() as i32);
+                null_buffer_builder.append(true);
+            },
+            DataBuilder::Struct { fields, field_builders, null_buffer_builder, } => {
+                for field_builder in field_builders {
+                    field_builder.append_default_value();
+                }
+                null_buffer_builder.append(true);
+            },
+        }
+    }
+
+    fn append_null(&mut self) {
+        match self {
+            DataBuilder::Int32(builder) => builder.append_null(),
+            DataBuilder::Int64(builder) => builder.append_null(),
+            DataBuilder::Float32(builder) => builder.append_null(),
+            DataBuilder::Float64(builder) => builder.append_null(),
+            DataBuilder::String(builder) => builder.append_null(),
+            DataBuilder::Boolean(builder) => builder.append_null(),
+            DataBuilder::TimestampSeconds(builder) => builder.append_null(),
+            DataBuilder::TimestampMillis(builder) => builder.append_null(),
+            DataBuilder::TimestampMicros(builder) => builder.append_null(),
+            DataBuilder::TimestampNanos(builder) => builder.append_null(),
+            DataBuilder::List { item_type, item_builder, offsets_builder, null_buffer_builder, } => {
+                offsets_builder.push(item_builder.len() as i32);
+                null_buffer_builder.append(false);
+            },
+            DataBuilder::Struct { fields, field_builders, null_buffer_builder, } => {
+                for field_builder in field_builders {
+                    field_builder.append_default_value();
+                }
+                null_buffer_builder.append(false);
+            },
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            DataBuilder::Int32(builder) => builder.len(),
+            DataBuilder::Int64(builder) => builder.len(),
+            DataBuilder::Float32(builder) => builder.len(),
+            DataBuilder::Float64(builder) => builder.len(),
+            DataBuilder::String(builder) => builder.len(),
+            DataBuilder::Boolean(builder) => builder.len(),
+            DataBuilder::TimestampSeconds(builder) => builder.len(),
+            DataBuilder::TimestampMillis(builder) => builder.len(),
+            DataBuilder::TimestampMicros(builder) => builder.len(),
+            DataBuilder::TimestampNanos(builder) => builder.len(),
+            DataBuilder::List { item_type, item_builder, offsets_builder, null_buffer_builder, } => null_buffer_builder.len(),
+            DataBuilder::Struct { fields, field_builders, null_buffer_builder, } => null_buffer_builder.len(),
+        }
+    }
+}
+
+fn make_data_builder(data_type: &DataType, capacity: usize) -> Result<DataBuilder> {
+    match data_type {
+        DataType::Int32 => Ok(DataBuilder::Int32(Int32Builder::with_capacity(capacity))),
+        DataType::Int64 => Ok(DataBuilder::Int64(Int64Builder::with_capacity(capacity))),
+        DataType::Float32 => Ok(DataBuilder::Float32(Float32Builder::with_capacity(capacity))),
+        DataType::Float64 => Ok(DataBuilder::Float64(Float64Builder::with_capacity(capacity))),
+        DataType::Utf8 => Ok(DataBuilder::String(StringBuilder::with_capacity(capacity, capacity))),
+        DataType::Boolean => Ok(DataBuilder::Boolean(BooleanBuilder::with_capacity(capacity))),
+        DataType::Timestamp(unit, _) => match unit {
+            TimeUnit::Second => Ok(DataBuilder::TimestampSeconds(TimestampSecondBuilder::with_capacity(capacity))),
+            TimeUnit::Millisecond => Ok(DataBuilder::TimestampMillis(TimestampMillisecondBuilder::with_capacity(capacity))),
+            TimeUnit::Microsecond => Ok(DataBuilder::TimestampMicros(TimestampMicrosecondBuilder::with_capacity(capacity))),
+            TimeUnit::Nanosecond => Ok(DataBuilder::TimestampNanos(TimestampNanosecondBuilder::with_capacity(capacity))),
+        },
+        DataType::List(f) => {
+            let item_type = f.data_type().clone();
+            let item_builder = Box::new(make_data_builder(f.data_type(), capacity)?);
+            let mut offsets_builder = Vec::with_capacity(capacity + 1);
+            let null_buffer_builder = NullBufferBuilder::new(capacity);
+            offsets_builder.push(0);
+            Ok(DataBuilder::List {item_type, item_builder, offsets_builder, null_buffer_builder, })
+        },
+        DataType::Struct(fields) => {
+            let fields = fields.clone();
+            let field_builders  = fields.iter().map(|f| make_data_builder(f.data_type(), capacity)).collect::<Result<Vec<_>>>()?;
+            let null_buffer_builder = NullBufferBuilder::new(capacity);
+            Ok(DataBuilder::Struct {fields, field_builders, null_buffer_builder})
+        },
+        _ => Err(anyhow::anyhow!("not support data type: {:?}", data_type)),
+    }
+}
+
+#[inline]
+fn builder_int32_append_value(builder: &mut DataBuilder, value: i32) {
+    if let DataBuilder::Int32(builder) = builder {
+        builder.append_value(value);
+    } else {
+        unreachable!()
+    }
+}
+
+#[inline]
+fn builder_int64_append_value(builder: &mut DataBuilder, value: i64) {
+    if let DataBuilder::Int64(builder) = builder {
+        builder.append_value(value);
+    } else {
+        unreachable!()
+    }
+}
+
+#[inline]
+fn builder_float32_append_value(builder: &mut DataBuilder, value: f32) {
+    if let DataBuilder::Float32(builder) = builder {
+        builder.append_value(value);
+    } else {
+        unreachable!()
+    }
+}
+
+#[inline]
+fn builder_float64_append_value(builder: &mut DataBuilder, value: f64) {
+    if let DataBuilder::Float64(builder) = builder {
+        builder.append_value(value);
+    } else {
+        unreachable!()
+    }
+}
+
+ #[inline]
+ fn builder_string_append_value(builder: &mut DataBuilder, value: &str) {
+     if let DataBuilder::String(builder) = builder {
+        builder.append_value(value);
+    } else {
+        unreachable!()
+    }
+ }
+
+ #[inline]
+ fn builder_boolean_append_value(builder: &mut DataBuilder, value: bool) {
+     if let DataBuilder::Boolean(builder) = builder {
+        builder.append_value(value);
+    } else {
+        unreachable!()
+    }
+ }
+
+ #[inline]
+ fn builder_timestamp_seconds_append_value(builder: &mut DataBuilder, value: i64) {
+     if let DataBuilder::TimestampSeconds(builder) = builder {
+        builder.append_value(value);
+    } else {
+        unreachable!()
+    }
+ }
+
+ #[inline]
+ fn builder_timestamp_millis_append_value(builder: &mut DataBuilder, value: i64) {
+     if let DataBuilder::TimestampMillis(builder) = builder {
+        builder.append_value(value);
+    } else {
+        unreachable!()
+    }
+ }
+
+ #[inline]
+ fn builder_timestamp_micros_append_value(builder: &mut DataBuilder, value: i64) {
+     if let DataBuilder::TimestampMicros(builder) = builder {
+        builder.append_value(value);
+    } else {
+        unreachable!()
+    }
+ }
+
+
 pub trait Faker: Debug {
     fn data_type(&self) -> DataType;
 
-    fn init(&mut self, capacity: usize) -> Result<()>;
+    fn init(&mut self, capacity: usize) -> Result<()> {
+        Ok(())
+    }
 
-    fn gene_value(&mut self) -> Result<()>;
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> Result<()>;
 
-    fn gene_null(&mut self) -> Result<()>;
+    fn gene_null(&mut self) -> Result<()> {
+        Ok(())
+    }
 
-    fn len(&self) -> usize;
+    fn len(&self) -> usize {
+        0
+    }
 
-    fn finish(&mut self) -> Result<ArrayRef>;
+    fn finish(&mut self) -> Result<ArrayRef> {
+        Err(anyhow::anyhow!("not support finish"))
+    }
+
+    fn should_flatten_fields(&self) -> bool {
+        false
+    }
+
+    fn is_compute_faker(&self) -> bool {
+        false
+    }
+
+    fn compute(&self, fields: & HashMap<&str, ArrayRef>) -> Result<ArrayRef> {
+        Err(anyhow::anyhow!("not support compute"))
+    }
 }
 
 #[derive(Debug, Serialize,Deserialize)]

@@ -1,4 +1,4 @@
-use crate::faker::{wrap_faker_necessary, FakerConfig};
+use crate::faker::{builder_string_append_value, wrap_faker_necessary, DataBuilder, FakerConfig};
 use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
@@ -81,12 +81,11 @@ pub struct Ipv4Faker {
     start: u32,
     end: u32,
     buf: String,
-    builder: StringBuilder,
 }
 
 impl Ipv4Faker {
     pub fn new(start: u32, end: u32) -> Self {
-        Self { start, end, buf: String::with_capacity(15), builder: StringBuilder::with_capacity(0, 0) }
+        Self { start, end, buf: String::with_capacity(15), }
     }
 }
 
@@ -94,13 +93,8 @@ impl Faker for Ipv4Faker {
     fn data_type(&self) -> DataType {
         DataType::Utf8
     }
-
-    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
-        self.builder = StringBuilder::with_capacity(capacity, capacity);
-        Ok(())
-    }
-
-    fn gene_value(&mut self) -> anyhow::Result<()> {
+    
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
         self.buf.clear();
         let ip = rand::rng().random_range(self.start..=self.end);
         let a = (ip >> 24) & 0xff;
@@ -108,21 +102,8 @@ impl Faker for Ipv4Faker {
         let c = (ip >> 8) & 0xff;
         let d = ip & 0xff;
         let _ = write!(&mut self.buf, "{}.{}.{}.{}", a, b, c, d);
-        self.builder.append_value(self.buf.as_str());
+        builder_string_append_value(builder, self.buf.as_str());
         Ok(())
-    }
-
-    fn gene_null(&mut self) -> anyhow::Result<()> {
-        self.builder.append_null();
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.builder.len()
-    }
-
-    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-        Ok(Arc::new(self.builder.finish()))
     }
 }
 
@@ -131,7 +112,6 @@ pub struct Ipv6Faker {
     start: u128,
     end: u128,
     buf: String,
-    builder: StringBuilder,
 }
 
 impl Ipv6Faker {
@@ -140,7 +120,6 @@ impl Ipv6Faker {
             start,
             end,
             buf: String::with_capacity(40),
-            builder: StringBuilder::with_capacity(0, 0),
         }
     }
 }
@@ -149,34 +128,17 @@ impl Faker for Ipv6Faker {
     fn data_type(&self) -> DataType {
         DataType::Utf8
     }
-
-    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
-        self.builder = StringBuilder::with_capacity(capacity, capacity);
-        Ok(())
-    }
-
-    fn gene_value(&mut self) -> anyhow::Result<()> {
+    
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
         self.buf.clear();
 
         let ip = rand::rng().random_range(self.start..=self.end);
 
         let addr = Ipv6Addr::from(ip);
         let _ = write!(self.buf, "{}", addr);
-
-        self.builder.append_value(&self.buf);
+        
+        builder_string_append_value(builder, self.buf.as_str());
         Ok(())
     }
-
-    fn gene_null(&mut self) -> anyhow::Result<()> {
-        self.builder.append_null();
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.builder.len()
-    }
-
-    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-        Ok(Arc::new(self.builder.finish()))
-    }
+    
 }

@@ -8,7 +8,7 @@ use rand::{Rng, SeedableRng};
 use rand_regex::Regex as RandRegex;
 use serde::{Deserialize, Serialize};
 
-use super::{wrap_faker_necessary, Faker, FakerConfig, WrapConfig};
+use super::{builder_string_append_value, wrap_faker_necessary, DataBuilder, Faker, FakerConfig, WrapConfig};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StringFakerConfig {
@@ -79,11 +79,10 @@ impl Faker for OptionStringFaker {
 
     fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
         self.index = 0;
-        self.builder = StringBuilder::with_capacity(capacity, capacity);
         Ok(())
     }
 
-    fn gene_value(&mut self) -> anyhow::Result<()> {
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
         let p = if self.options.len() == 1 {
             self.options[0].as_deref()
         } else {
@@ -98,22 +97,13 @@ impl Faker for OptionStringFaker {
                 self.options[rand::random_range(0..self.options.len())].as_deref()
             }
         };
-        self.builder.append_option(p);
+        match p {
+            Some(v) => builder_string_append_value(builder, v),
+            None => builder.append_null(),
+        }
         Ok(())
     }
-
-    fn gene_null(&mut self) -> anyhow::Result<()> {
-        self.builder.append_null();
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.builder.len()
-    }
-
-    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-        Ok(Arc::new(self.builder.finish()))
-    }
+    
 }
 
 /// Random UTF-8 strings of fixed length, each codepoint drawn uniformly from `chars`.
@@ -122,7 +112,6 @@ pub struct CharsStringFaker {
     chars: Box<[char]>,
     len: usize,
     s: String,
-    builder: StringBuilder,
 }
 
 impl CharsStringFaker {
@@ -136,7 +125,6 @@ impl CharsStringFaker {
             chars: chars.into_boxed_slice(),
             len,
             s: String::with_capacity(len),
-            builder: StringBuilder::with_capacity(0, 0),
         })
     }
 }
@@ -145,33 +133,15 @@ impl Faker for CharsStringFaker {
     fn data_type(&self) -> DataType {
         DataType::Utf8
     }
-
-    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
-        self.builder = StringBuilder::with_capacity(capacity, capacity);
-        Ok(())
-    }
-
-    fn gene_value(&mut self) -> anyhow::Result<()> {
+    
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
         self.s.clear();
         for _ in 0..self.len {
             let i = rand::rng().random_range(0..self.chars.len());
             self.s.push(self.chars[i]);
         }
-        self.builder.append_value(self.s.as_str());
+        builder_string_append_value(builder, &self.s);
         Ok(())
-    }
-
-    fn gene_null(&mut self) -> anyhow::Result<()> {
-        self.builder.append_null();
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.builder.len()
-    }
-
-    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-        Ok(Arc::new(self.builder.finish()))
     }
 }
 
@@ -180,7 +150,6 @@ impl Faker for CharsStringFaker {
 pub struct RegexStringFaker {
     dist: RandRegex,
     rng: StdRng,
-    builder: StringBuilder,
 }
 
 impl RegexStringFaker {
@@ -190,7 +159,6 @@ impl RegexStringFaker {
         Ok(Self {
             dist,
             rng: StdRng::seed_from_u64(42),
-            builder: StringBuilder::with_capacity(0, 0),
         })
     }
 }
@@ -209,29 +177,11 @@ impl Faker for RegexStringFaker {
     fn data_type(&self) -> DataType {
         DataType::Utf8
     }
-
-    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
-        self.builder = StringBuilder::with_capacity(capacity, capacity);
-        Ok(())
-    }
-
-    fn gene_value(&mut self) -> anyhow::Result<()> {
+    
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
         let s: String = self.rng.sample(&self.dist);
-        self.builder.append_value(s.as_str());
+        builder_string_append_value(builder, &s);
         Ok(())
-    }
-
-    fn gene_null(&mut self) -> anyhow::Result<()> {
-        self.builder.append_null();
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.builder.len()
-    }
-
-    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-        Ok(Arc::new(self.builder.finish()))
     }
 }
 

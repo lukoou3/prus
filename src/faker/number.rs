@@ -5,7 +5,7 @@ use arrow_array::builder::{ArrayBuilder, Float32Builder, Float64Builder, Int32Bu
 use arrow_schema::DataType;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use super::{wrap_faker_necessary, Faker, FakerConfig, WrapConfig};
+use super::{builder_float32_append_value, builder_float64_append_value, builder_int32_append_value, builder_int64_append_value, wrap_faker_necessary, DataBuilder, Faker, FakerConfig, WrapConfig};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct IntFakerConfig {
@@ -152,13 +152,12 @@ fn default_sequence_batch() -> u32 {
 
 /// Picks from a fixed list of optional values (null = explicit `None` in the list).
 macro_rules! impl_option_faker {
-    ($name:ident, $native:ty, $data_ty:expr, $builder:ty) => {
+    ($name:ident, $native:ty, $data_ty:expr, $builder:ty, $append_func:ident) => {
         #[derive(Debug)]
         pub struct $name {
             options: Vec<Option<$native>>,
             random: bool,
             index: usize,
-            builder: $builder,
         }
 
         impl $name {
@@ -173,7 +172,6 @@ macro_rules! impl_option_faker {
                     options,
                     random,
                     index: 0,
-                    builder: <$builder>::with_capacity(0),
                 })
             }
         }
@@ -185,11 +183,10 @@ macro_rules! impl_option_faker {
 
             fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
                 self.index = 0;
-                self.builder = <$builder>::with_capacity(capacity);
                 Ok(())
             }
 
-            fn gene_value(&mut self) -> anyhow::Result<()> {
+            fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
                 let p = if !self.random {
                     if self.index == self.options.len() {
                         self.index = 0;
@@ -200,21 +197,11 @@ macro_rules! impl_option_faker {
                 } else {
                     self.options[rand::rng().random_range(0..self.options.len())]
                 };
-                self.builder.append_option(p);
+                match p {
+                    Some(v) => $append_func(builder, v),
+                    None => builder.append_null(),
+                }
                 Ok(())
-            }
-
-            fn gene_null(&mut self) -> anyhow::Result<()> {
-                self.builder.append_null();
-                Ok(())
-            }
-
-            fn len(&self) -> usize {
-                self.builder.len()
-            }
-
-            fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-                Ok(Arc::new(self.builder.finish()))
             }
         }
     };
@@ -222,7 +209,7 @@ macro_rules! impl_option_faker {
 
 /// Half-open integer range `[start, end)`: random uniform, or sequential cycle through every integer.
 macro_rules! impl_range_integer_faker {
-    ($name:ident, $native:ty, $data_ty:expr, $builder:ty) => {
+    ($name:ident, $native:ty, $data_ty:expr, $builder:ty, $append_func:ident) => {
         #[derive(Debug)]
         pub struct $name {
             start: $native,
@@ -230,7 +217,6 @@ macro_rules! impl_range_integer_faker {
             random: bool,
             one_value: bool,
             value: $native,
-            builder: $builder,
         }
 
         impl $name {
@@ -249,7 +235,6 @@ macro_rules! impl_range_integer_faker {
                     random,
                     one_value: start + 1 == end,
                     value: start,
-                    builder: <$builder>::with_capacity(0),
                 })
             }
         }
@@ -261,11 +246,10 @@ macro_rules! impl_range_integer_faker {
 
             fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
                 self.value = self.start;
-                self.builder = <$builder>::with_capacity(capacity);
                 Ok(())
             }
 
-            fn gene_value(&mut self) -> anyhow::Result<()> {
+            fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
                 let v = if self.one_value {
                     self.start
                 } else if self.random {
@@ -278,21 +262,8 @@ macro_rules! impl_range_integer_faker {
                     self.value += 1;
                     v
                 };
-                self.builder.append_value(v);
+                $append_func(builder, v);
                 Ok(())
-            }
-
-            fn gene_null(&mut self) -> anyhow::Result<()> {
-                self.builder.append_null();
-                Ok(())
-            }
-
-            fn len(&self) -> usize {
-                self.builder.len()
-            }
-
-            fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-                Ok(Arc::new(self.builder.finish()))
             }
         }
     };
@@ -300,12 +271,11 @@ macro_rules! impl_range_integer_faker {
 
 /// Half-open float range `[start, end)`: each `gene_value` draws uniformly from `[start, end)` (no extra flag).
 macro_rules! impl_range_float_faker {
-    ($name:ident, $native:ty, $data_ty:expr, $builder:ty) => {
+    ($name:ident, $native:ty, $data_ty:expr, $builder:ty, $append_func:ident) => {
         #[derive(Debug)]
         pub struct $name {
             start: $native,
             end: $native,
-            builder: $builder,
         }
 
         impl $name {
@@ -319,7 +289,6 @@ macro_rules! impl_range_float_faker {
                 Ok(Self {
                     start,
                     end,
-                    builder: <$builder>::with_capacity(0),
                 })
             }
         }
@@ -329,43 +298,25 @@ macro_rules! impl_range_float_faker {
                 $data_ty
             }
 
-            fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
-                self.builder = <$builder>::with_capacity(capacity);
-                Ok(())
-            }
-
-            fn gene_value(&mut self) -> anyhow::Result<()> {
+            fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
                 let v = rand::rng().random_range(self.start..self.end);
-                self.builder.append_value(v);
+                $append_func(builder, v);
                 Ok(())
-            }
-
-            fn gene_null(&mut self) -> anyhow::Result<()> {
-                self.builder.append_null();
-                Ok(())
-            }
-
-            fn len(&self) -> usize {
-                self.builder.len()
-            }
-
-            fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-                Ok(Arc::new(self.builder.finish()))
             }
         }
     };
 }
 
-impl_option_faker!(OptionIntFaker, i32, DataType::Int32, Int32Builder);
-impl_option_faker!(OptionBigintFaker, i64, DataType::Int64, Int64Builder);
-impl_option_faker!(OptionFloatFaker, f32, DataType::Float32, Float32Builder);
-impl_option_faker!(OptionDoubleFaker, f64, DataType::Float64, Float64Builder);
+impl_option_faker!(OptionIntFaker, i32, DataType::Int32, Int32Builder, builder_int32_append_value);
+impl_option_faker!(OptionBigintFaker, i64, DataType::Int64, Int64Builder, builder_int64_append_value);
+impl_option_faker!(OptionFloatFaker, f32, DataType::Float32, Float32Builder, builder_float32_append_value);
+impl_option_faker!(OptionDoubleFaker, f64, DataType::Float64, Float64Builder, builder_float64_append_value);
 
-impl_range_integer_faker!(RangeIntFaker, i32, DataType::Int32, Int32Builder);
-impl_range_integer_faker!(RangeBigintFaker, i64, DataType::Int64, Int64Builder);
+impl_range_integer_faker!(RangeIntFaker, i32, DataType::Int32, Int32Builder, builder_int32_append_value);
+impl_range_integer_faker!(RangeBigintFaker, i64, DataType::Int64, Int64Builder, builder_int64_append_value);
 
-impl_range_float_faker!(RangeFloatFaker, f32, DataType::Float32, Float32Builder);
-impl_range_float_faker!(RangeDoubleFaker, f64, DataType::Float64, Float64Builder);
+impl_range_float_faker!(RangeFloatFaker, f32, DataType::Float32, Float32Builder, builder_float32_append_value);
+impl_range_float_faker!(RangeDoubleFaker, f64, DataType::Float64, Float64Builder, builder_float64_append_value);
 
 #[derive(Debug)]
 pub struct SequenceFaker {
@@ -374,12 +325,11 @@ pub struct SequenceFaker {
     batch: u32,
     cnt: u32,
     value: i64,
-    builder: Int64Builder,
 }
 
 impl SequenceFaker {
     pub fn new(start: i64, step: i64, batch: u32) -> Self {
-        Self {start, step, batch, cnt: 0, value: start, builder: Int64Builder::with_capacity(0)}
+        Self {start, step, batch, cnt: 0, value: start}
     }
 }
 
@@ -391,12 +341,11 @@ impl Faker for SequenceFaker {
     fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
         self.cnt = 0;
         self.value = self.start;
-        self.builder = Int64Builder::with_capacity(capacity);
         Ok(())
     }
 
-    fn gene_value(&mut self) -> anyhow::Result<()> {
-        self.builder.append_value(self.value);
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
+        builder_int64_append_value(builder, self.value);
         self.cnt += 1;
         if self.cnt >= self.batch {
             self.cnt = 0;
@@ -405,18 +354,6 @@ impl Faker for SequenceFaker {
         Ok(())
     }
 
-    fn gene_null(&mut self) -> anyhow::Result<()> {
-        self.builder.append_null();
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.builder.len()
-    }
-
-    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-        Ok(Arc::new(self.builder.finish()))
-    }
 }
 
 mod test {

@@ -3,7 +3,7 @@ use arrow::compute::kernels::numeric::add_wrapping;
 use arrow::compute::kernels::substring::substring_by_char;
 use arrow::datatypes::{DataType, Field, Fields};
 use arrow_array::{record_batch, Array, ArrayRef, BooleanArray, GenericListArray, Int32Array, PrimitiveArray, RecordBatch, StringArray, StructArray};
-use arrow_array::builder::{Int32Builder, ListBuilder, StringBuilder};
+use arrow_array::builder::{BooleanBuilder, Int32Builder, ListBuilder, StringBuilder, StructBuilder};
 use arrow_array::cast::AsArray;
 use arrow_array::types::Int32Type;
 use arrow_schema::Schema;
@@ -127,6 +127,71 @@ fn test_struct_array() {
 
 }
 
+fn test_struct_array_build() {
+    let fields = Fields::from(vec![
+        Field::new("id", DataType::Int32, true),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("active", DataType::Boolean, false),
+    ]);
+
+    let mut struct_builder = StructBuilder::new(
+        fields,
+        vec![
+            Box::new(Int32Builder::with_capacity(10)),
+            Box::new(StringBuilder::with_capacity(10, 200)),
+            Box::new(BooleanBuilder::with_capacity(10)),
+        ],
+    );
+
+    // 第1行：正常值
+    {
+        let id_builder = struct_builder.field_builder::<Int32Builder>(0).unwrap();
+        id_builder.append_value(1);
+
+        let name_builder = struct_builder.field_builder::<StringBuilder>(1).unwrap();
+        name_builder.append_value("Alice");
+
+        let active_builder = struct_builder.field_builder::<BooleanBuilder>(2).unwrap();
+        active_builder.append_value(true);
+
+        struct_builder.append(true);   // true 表示这一行 struct 是 non-null
+    }
+
+    // 第2行：整个 struct 为 null（推荐写法）
+    {
+        // 必须给每个子字段 append_null（即使 struct 是 null）
+        struct_builder.field_builder::<Int32Builder>(0).unwrap().append_value(0);
+        struct_builder.field_builder::<StringBuilder>(1).unwrap().append_value("");
+        struct_builder.field_builder::<BooleanBuilder>(2).unwrap().append_value(false); // 虽然字段不可空，但这里仍需 append
+        struct_builder.append(false);  // 或 struct_builder.append_null();
+    }
+
+    // 第3行：部分字段为 null（id 和 name 为 null，active 必须有值）
+    {
+        let id_builder = struct_builder.field_builder::<Int32Builder>(0).unwrap();
+        id_builder.append_null();
+
+        let name_builder = struct_builder.field_builder::<StringBuilder>(1).unwrap();
+        name_builder.append_null();
+
+        let active_builder = struct_builder.field_builder::<BooleanBuilder>(2).unwrap();
+        active_builder.append_value(false);
+
+        struct_builder.append(true);   // struct 本身 non-null，但里面有 null 字段
+    }
+
+    // 第4行：再加一行
+    {
+        struct_builder.field_builder::<Int32Builder>(0).unwrap().append_value(42);
+        struct_builder.field_builder::<StringBuilder>(1).unwrap().append_value("Bob");
+        struct_builder.field_builder::<BooleanBuilder>(2).unwrap().append_value(true);
+        struct_builder.append(true);
+    }
+
+    let array = struct_builder.finish();
+    println!("{:?}", array);
+}
+
 fn test_record_batch() {
     let batch = record_batch!(
         ("a", Int32, [1, 2, 3]),
@@ -223,7 +288,8 @@ fn main() {
     //test_array_ref_cast();
     //test_list_array();
     //test_struct_array();
-    test_record_batch();
+    test_struct_array_build();
+    //test_record_batch();
     //test_add_function();
     //test_substr_function();
     //test_split_function();

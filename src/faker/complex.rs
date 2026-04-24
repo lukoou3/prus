@@ -4,15 +4,13 @@ use arrow::buffer::{Buffer, OffsetBuffer};
 use arrow_array::{ArrayRef, ListArray};
 use arrow_schema::{DataType, Field};
 use rand::Rng;
-use crate::faker::Faker;
+use crate::faker::{DataBuilder, Faker};
 
 #[derive(Debug)]
 pub struct ArrayFaker {
     ele_faker: Box<dyn Faker>,
     array_len_min: i32,
     array_len_max: i32,
-    offsets_builder: Vec<i32>,
-    null_buffer_builder: NullBufferBuilder,
 }
 
 impl ArrayFaker {
@@ -21,8 +19,6 @@ impl ArrayFaker {
             ele_faker,
             array_len_min,
             array_len_max,
-            offsets_builder: vec![],
-            null_buffer_builder: NullBufferBuilder::new(0),
         }
     }
 }
@@ -34,42 +30,22 @@ impl Faker for ArrayFaker {
 
     fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
         self.ele_faker.init(capacity)?;
-        self.offsets_builder = Vec::with_capacity(capacity + 1);
-        self.offsets_builder.push(0);
-        self.null_buffer_builder = NullBufferBuilder::new(capacity);
         Ok(())
     }
 
-    fn gene_value(&mut self) -> anyhow::Result<()> {
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
         let len = rand::rng().random_range(self.array_len_min..=self.array_len_max);
-        for _ in 0..len {
-            self.ele_faker.gene_value()?;
+        match builder {
+            DataBuilder::List{item_type, item_builder, offsets_builder, null_buffer_builder} => {
+                for _ in 0..len {
+                    self.ele_faker.gene_value(item_builder)?;
+                }
+                offsets_builder.push(item_builder.len() as i32);
+                null_buffer_builder.append(true);
+                Ok(())
+            },
+            _ => Err(anyhow::anyhow!("unexpected builder type"))
         }
-        self.offsets_builder.push(self.ele_faker.len() as i32);
-        self.null_buffer_builder.append(true);
-        Ok(())
-    }
-
-    fn gene_null(&mut self) -> anyhow::Result<()> {
-        self.offsets_builder.push(self.ele_faker.len() as i32);
-        self.null_buffer_builder.append(false);
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.offsets_builder.len()
-    }
-
-    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-        let offsets = Buffer::from_vec(std::mem::take(&mut self.offsets_builder));
-        // Safety: Safe by construction
-        let offsets = unsafe { OffsetBuffer::new_unchecked(offsets.into()) };
-        Ok(Arc::new(ListArray::new(
-            Arc::new(Field::new_list_field(self.ele_faker.data_type(), true)),
-            offsets,
-            self.ele_faker.finish()?,
-            self.null_buffer_builder.finish(),
-        )))
     }
 }
 
@@ -103,11 +79,12 @@ impl Faker for NullAbleFaker {
         self.ele_faker.init(capacity)
     }
 
-    fn gene_value(&mut self) -> anyhow::Result<()> {
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
         if rand::rng().random_range(0.0f32..1.0f32) < self.null_rate {
-            self.ele_faker.gene_null()
+            builder.append_null();
+            Ok(())
         } else {
-            self.ele_faker.gene_value()
+            self.ele_faker.gene_value(builder)
         }
     }
 
@@ -121,6 +98,83 @@ impl Faker for NullAbleFaker {
 
     fn finish(&mut self) -> anyhow::Result<ArrayRef> {
         self.ele_faker.finish()
+    }
+}
+
+#[derive(Debug)]
+pub struct FieldsFaker {
+    field_fakers: Vec<(String, Box<dyn Faker>)>,
+    weight: u32,
+    weight_index: u32,
+}
+
+impl FieldsFaker {
+    pub fn new(field_fakers: Vec<(String, Box<dyn Faker>)>, weight: u32) -> Self {
+        FieldsFaker {
+            field_fakers,
+            weight,
+            weight_index: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct UnionFaker {
+    fields_fakers: Vec<FieldsFaker>,
+    random: bool,
+    weights: Vec<u32>,
+    weight_max: u32,
+    index: usize,
+}
+
+impl UnionFaker {
+    pub fn new(fields_fakers: Vec<FieldsFaker>, random: bool) -> Self {
+        let mut weights = Vec::with_capacity(fields_fakers.len());
+        for (i, faker) in fields_fakers.iter().enumerate() {
+            if i == 0 {
+                weights.push(faker.weight);
+            } else {
+                weights.push(faker.weight + weights[i - 1]);
+            }
+        }
+        let weight_max = weights[weights.len() - 1];
+        UnionFaker {
+            fields_fakers,
+            random,
+            weights,
+            weight_max,
+            index: 0,
+        }
+    }
+}
+
+impl Faker for UnionFaker {
+    fn data_type(&self) -> DataType {
+        todo!()
+    }
+
+    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
+        todo!()
+    }
+
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
+        todo!()
+    }
+
+    fn gene_null(&mut self) -> anyhow::Result<()> {
+        todo!()
+    }
+
+    fn len(&self) -> usize {
+        todo!()
+    }
+
+    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
+        todo!()
+    }
+
+    fn should_flatten_fields(&self) -> bool {
+        true
     }
 }
 

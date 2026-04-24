@@ -4,7 +4,7 @@ use arrow_array::{ArrayRef, Int64Array, TimestampMicrosecondArray};
 use arrow_schema::{DataType, TimeUnit};
 use chrono::{NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
-use crate::faker::{wrap_faker_necessary, Faker, FakerConfig, WrapConfig};
+use crate::faker::{builder_int64_append_value, builder_timestamp_micros_append_value, wrap_faker_necessary, DataBuilder, Faker, FakerConfig, WrapConfig};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TimestampFakerConfig {
@@ -100,8 +100,6 @@ fn default_timestamp_sequence_batch() -> u32 {
 pub struct TimestampFaker {
     unit: TimestampUnit,
     timestamp_type: TimestampType,
-    values_builder: Vec<i64>,
-    null_buffer_builder: NullBufferBuilder,
 }
 
 impl TimestampFaker {
@@ -109,8 +107,6 @@ impl TimestampFaker {
         TimestampFaker {
             unit,
             timestamp_type,
-            values_builder: vec![],
-            null_buffer_builder: NullBufferBuilder::new(0),
         }
     }
 }
@@ -122,53 +118,29 @@ impl Faker for TimestampFaker {
             TimestampType::Datetime => DataType::Timestamp(TimeUnit::Microsecond, None),
         }
     }
-
-    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
-        self.values_builder = Vec::with_capacity(capacity);
-        self.null_buffer_builder = NullBufferBuilder::new(capacity);
-        Ok(())
-    }
-
-    fn gene_value(&mut self) -> anyhow::Result<()> {
-        let  v = match self.timestamp_type {
+    
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
+        match self.timestamp_type {
             TimestampType::Number => {
-                match self.unit {
+                let  v = match self.unit {
                     TimestampUnit::Seconds => Utc::now().timestamp(),
                     TimestampUnit::Millis => Utc::now().timestamp_millis(),
                     TimestampUnit::Micros => Utc::now().timestamp_micros(),
-                }
+                };
+                builder_int64_append_value(builder, v);
             },
             TimestampType::Datetime => {
-                match self.unit {
+                let  v = match self.unit {
                     TimestampUnit::Seconds => Utc::now().timestamp() * 1000_000,
                     TimestampUnit::Millis => Utc::now().timestamp_millis() * 1000,
                     TimestampUnit::Micros => Utc::now().timestamp_micros(),
-                }
+                };
+                builder_timestamp_micros_append_value(builder, v);
             },
         };
-        self.null_buffer_builder.append_non_null();
-        self.values_builder.push(v);
         Ok(())
     }
-
-    fn gene_null(&mut self) -> anyhow::Result<()> {
-        self.null_buffer_builder.append_null();
-        self.values_builder.push(0);
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.values_builder.len()
-    }
-
-    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-        let values = std::mem::take(&mut self.values_builder).into();
-        let nulls = self.null_buffer_builder.finish();
-        match self.timestamp_type {
-            TimestampType::Number => Ok(Arc::new(Int64Array::try_new(values, nulls)?)),
-            TimestampType::Datetime => Ok(Arc::new(TimestampMicrosecondArray::try_new(values, nulls)?)),
-        }
-    }
+    
 }
 
 #[derive(Debug)]
@@ -216,7 +188,7 @@ impl Faker for TimestampSequenceFaker {
         Ok(())
     }
 
-    fn gene_value(&mut self) -> anyhow::Result<()> {
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
         if self.cnt >= self.batch {
             self.value += self.step;
             self.cnt = 0;
