@@ -1,7 +1,3 @@
-use std::sync::Arc;
-
-use arrow_array::ArrayRef;
-use arrow_array::builder::{ArrayBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder};
 use arrow_schema::DataType;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -181,7 +177,7 @@ macro_rules! impl_option_faker {
                 $data_ty
             }
 
-            fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
+            fn init(&mut self) -> anyhow::Result<()> {
                 self.index = 0;
                 Ok(())
             }
@@ -244,7 +240,7 @@ macro_rules! impl_range_integer_faker {
                 $data_ty
             }
 
-            fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
+            fn init(&mut self) -> anyhow::Result<()> {
                 self.value = self.start;
                 Ok(())
             }
@@ -338,7 +334,7 @@ impl Faker for SequenceFaker {
         DataType::Int64
     }
 
-    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
+    fn init(&mut self) -> anyhow::Result<()> {
         self.cnt = 0;
         self.value = self.start;
         Ok(())
@@ -360,17 +356,16 @@ mod test {
     use arrow_array::Array;
     use arrow_array::cast::AsArray;
     use arrow_array::types::{Float32Type, Float64Type, Int32Type, Int64Type};
-
     use super::*;
 
     #[test]
     fn test_option_int_faker() {
         let mut faker = OptionIntFaker::new(vec![Some(1), Some(2), Some(3), None], true).unwrap();
-        faker.init(10).unwrap();
+        let mut builder = faker.data_builder(10).unwrap();
         for _ in 0..10 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         println!("{}", array.len());
         println!("{:?}", array);
     }
@@ -378,11 +373,11 @@ mod test {
     #[test]
     fn range_int_sequential_wraps() {
         let mut faker = RangeIntFaker::new(0, 3, false).unwrap();
-        faker.init(7).unwrap();
+        let mut builder = faker.data_builder(7).unwrap();
         for _ in 0..7 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         let arr = array.as_primitive::<Int32Type>();
         assert_eq!(arr.values(), &[0, 1, 2, 0, 1, 2, 0]);
     }
@@ -390,11 +385,11 @@ mod test {
     #[test]
     fn range_int_one_value() {
         let mut faker = RangeIntFaker::new(5, 6, false).unwrap();
-        faker.init(4).unwrap();
+        let mut builder = faker.data_builder(4).unwrap();
         for _ in 0..4 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         let arr = array.as_primitive::<Int32Type>();
         assert!(arr.values().iter().all(|&v| v == 5));
     }
@@ -402,11 +397,11 @@ mod test {
     #[test]
     fn range_int_random_stays_in_range() {
         let mut faker = RangeIntFaker::new(10, 20, true).unwrap();
-        faker.init(200).unwrap();
+        let mut builder = faker.data_builder(200).unwrap();
         for _ in 0..200 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         let arr = array.as_primitive::<Int32Type>();
         assert!(arr.values().iter().all(|&v| (10..20).contains(&v)));
     }
@@ -414,11 +409,11 @@ mod test {
     #[test]
     fn range_bigint_sequential() {
         let mut faker = RangeBigintFaker::new(100_i64, 103_i64, false).unwrap();
-        faker.init(7).unwrap();
+        let mut builder = faker.data_builder(7).unwrap();
         for _ in 0..7 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         let arr = array.as_primitive::<Int64Type>();
         assert_eq!(arr.values(), &[100, 101, 102, 100, 101, 102, 100]);
     }
@@ -431,11 +426,11 @@ mod test {
     #[test]
     fn option_float_sequential() {
         let mut faker = OptionFloatFaker::new(vec![Some(1.0), Some(2.0)], false).unwrap();
-        faker.init(4).unwrap();
+        let mut builder = faker.data_builder(4).unwrap();
         for _ in 0..4 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         let arr = array.as_primitive::<Float32Type>();
         assert_eq!(arr.values(), &[1.0, 2.0, 1.0, 2.0]);
     }
@@ -443,11 +438,11 @@ mod test {
     #[test]
     fn option_double_random_picks() {
         let mut faker = OptionDoubleFaker::new(vec![Some(0.25), Some(0.75)], true).unwrap();
-        faker.init(20).unwrap();
+        let mut builder = faker.data_builder(20).unwrap();
         for _ in 0..20 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         let arr = array.as_primitive::<Float64Type>();
         assert!(arr.values().iter().all(|&v| v == 0.25 || v == 0.75));
     }
@@ -455,11 +450,11 @@ mod test {
     #[test]
     fn range_float_random_stays_in_range() {
         let mut faker = RangeFloatFaker::new(0.0_f32, 1.0_f32).unwrap();
-        faker.init(500).unwrap();
+        let mut builder = faker.data_builder(500).unwrap();
         for _ in 0..500 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         let arr = array.as_primitive::<Float32Type>();
         assert!(arr.values().iter().all(|&v| v >= 0.0 && v < 1.0));
     }
@@ -467,11 +462,11 @@ mod test {
     #[test]
     fn range_double_random_stays_in_range() {
         let mut faker = RangeDoubleFaker::new(0.0_f64, 4.0_f64).unwrap();
-        faker.init(300).unwrap();
+        let mut builder = faker.data_builder(300).unwrap();
         for _ in 0..300 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         let arr = array.as_primitive::<Float64Type>();
         assert!(arr.values().iter().all(|&v| (0.0..4.0).contains(&v)));
     }
@@ -479,11 +474,11 @@ mod test {
     #[test]
     fn sequence_faker() {
         let mut faker = SequenceFaker::new(0, 1, 3);
-        faker.init(10).unwrap();
+        let mut builder = faker.data_builder(10).unwrap();
         for _ in 0..10 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         let arr = array.as_primitive::<Int64Type>();
         assert_eq!(arr.values(), &[0, 0, 0, 1, 1, 1, 2, 2, 2, 3]);
     }

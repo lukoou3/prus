@@ -2,9 +2,6 @@ use crate::faker::{builder_string_append_value, wrap_faker_necessary, DataBuilde
 use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
-use std::sync::Arc;
-use arrow_array::ArrayRef;
-use arrow_array::builder::{ArrayBuilder, StringBuilder};
 use arrow_schema::DataType;
 use rand::Rng;
 use serde::{Deserialize, Serialize};

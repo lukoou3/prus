@@ -1,0 +1,62 @@
+singleExpression = { SOI ~ expression ~ EOI}
+
+expression = { valueExpression }
+
+// 值表达式（算术层）
+valueExpression = { addSubExpression }
+
+// 加减法
+addSubExpression = { mulDivExpression ~ ((PLUS | MINUS) ~ mulDivExpression)* }
+// 乘除法
+mulDivExpression = { unaryExpression ~ ((ASTERISK | SLASH | PERCENT) ~ unaryExpression)* }
+// 一元表达式
+unaryExpression = { (MINUS | PLUS )? ~ atomicExpression }
+
+atomicExpression  = {
+    constant
+    | columnReference
+    | "(" ~ expression ~ ")"
+}
+
+columnReference = { identifier }
+
+constant = {  number | STRING }
+
+qualifiedName = { identifier ~ ("." ~ identifier)* }
+identifier = {unquotedIdentifier | quotedIdentifier}
+unquotedIdentifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHA | ASCII_DIGIT | "_")* } // [a-zA-Z0-9_]+
+quotedIdentifier = { "`" ~ (!"`" ~ ANY)* ~ "`"}
+
+number = {
+    doubleLiteral
+    | floatLiteral
+    | decimalLiteral
+    | bigIntLiteral
+    | integerLiteral
+}
+
+integerLiteral = @{ MINUS? ~ INTEGER_VALUE }
+bigIntLiteral = @{ MINUS? ~ BIGINT_LITERAL }
+decimalLiteral = @{ MINUS? ~ DOUBLE_VALUE }
+floatLiteral = @{ MINUS? ~ FLOAT_LITERAL }
+doubleLiteral = @{ MINUS? ~ DOUBLE_LITERAL }
+
+INTEGER_VALUE = @{ ASCII_DIGIT+ }
+BIGINT_LITERAL = @{ ASCII_DIGIT+ ~ ^"L" }
+DOUBLE_VALUE = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT* }
+FLOAT_LITERAL = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT* ~ ^"F" }
+DOUBLE_LITERAL = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT* ~ ^"D" }
+
+STRING = ${
+    "'" ~ ( !("'" | "\\") ~ ANY | "\\" ~ ANY )* ~ "'"
+    | "\"" ~ ( !("\"" | "\\") ~ ANY | "\\" ~ ANY )* ~ "\""
+}
+
+// arithmeticOperator = { PLUS | MINUS | ASTERISK | SLASH | PERCENT }
+PLUS = { "+" }
+MINUS = { "-" }
+ASTERISK = { "*" }
+SLASH = { "/" }
+PERCENT = { "%" }
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }

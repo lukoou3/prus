@@ -1,6 +1,3 @@
-use std::sync::Arc;
-use arrow::array::NullBufferBuilder;
-use arrow_array::{ArrayRef, Int64Array, TimestampMicrosecondArray};
 use arrow_schema::{DataType, TimeUnit};
 use chrono::{NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -152,8 +149,6 @@ pub struct TimestampSequenceFaker {
     batch: u32,
     cnt: u32,
     value: i64,
-    values_builder: Vec<i64>,
-    null_buffer_builder: NullBufferBuilder,
 }
 
 impl TimestampSequenceFaker {
@@ -166,8 +161,6 @@ impl TimestampSequenceFaker {
             batch,
             cnt: 0,
             value: start,
-            values_builder: vec![],
-            null_buffer_builder: NullBufferBuilder::new(0),
         }
     }
 }
@@ -180,11 +173,9 @@ impl Faker for TimestampSequenceFaker {
         }
     }
 
-    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
+    fn init(&mut self) -> anyhow::Result<()> {
         self.cnt = 0;
         self.value = self.start;
-        self.values_builder = Vec::with_capacity(capacity);
-        self.null_buffer_builder = NullBufferBuilder::new(capacity);
         Ok(())
     }
 
@@ -195,35 +186,17 @@ impl Faker for TimestampSequenceFaker {
         }
         self.cnt += 1;
         let  v = match self.timestamp_type {
-            TimestampType::Number => self.value,
-            TimestampType::Datetime => match self.unit {
-                TimestampUnit::Seconds => self.value * 1000_000,
-                TimestampUnit::Millis => self.value * 1000,
-                TimestampUnit::Micros => self.value,
+            TimestampType::Number => builder_int64_append_value(builder, self.value),
+            TimestampType::Datetime => {
+                let  v = match self.unit {
+                    TimestampUnit::Seconds => self.value * 1000_000,
+                    TimestampUnit::Millis => self.value * 1000,
+                    TimestampUnit::Micros => self.value,
+                };
+                builder_timestamp_micros_append_value(builder, v);
             },
         };
-        self.null_buffer_builder.append_non_null();
-        self.values_builder.push(v);
         Ok(())
-    }
-
-    fn gene_null(&mut self) -> anyhow::Result<()> {
-        self.null_buffer_builder.append_null();
-        self.values_builder.push(0);
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.values_builder.len()
-    }
-
-    fn finish(&mut self) -> anyhow::Result<ArrayRef> {
-        let values = std::mem::take(&mut self.values_builder).into();
-        let nulls = self.null_buffer_builder.finish();
-        match self.timestamp_type {
-            TimestampType::Number => Ok(Arc::new(Int64Array::try_new(values, nulls)?)),
-            TimestampType::Datetime => Ok(Arc::new(TimestampMicrosecondArray::try_new(values, nulls)?)),
-        }
     }
 
 }
@@ -235,11 +208,11 @@ mod test {
     #[test]
     fn test_timestamp_faker() {
         let mut faker = TimestampFaker::new(TimestampUnit::Micros, TimestampType::Number);
-        faker.init(100).unwrap();
+        let mut builder = faker.data_builder(100).unwrap();
         for _ in 0..100 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         assert_eq!(array.len(), 100);
         assert_eq!(array.null_count(), 0);
         assert_eq!(array.data_type(), &DataType::Int64);
@@ -248,11 +221,11 @@ mod test {
     #[test]
     fn test_timestamp_sequence_faker() {
         let mut faker = TimestampSequenceFaker::new(TimestampUnit::Micros, TimestampType::Number, 0, 10, 5);
-        faker.init(20).unwrap();
+        let mut builder = faker.data_builder(20).unwrap();
         for _ in 0..20 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         let arr = array.as_primitive::<Int64Type>();
         assert_eq!(arr.values(), &[0, 0, 0, 0, 0, 10, 10, 10, 10, 10, 20, 20, 20, 20, 20, 30, 30, 30, 30, 30])
     }
@@ -260,11 +233,11 @@ mod test {
     #[test]
     fn test_timestamp_datetime_faker() {
         let mut faker = TimestampFaker::new(TimestampUnit::Micros, TimestampType::Datetime);
-        faker.init(10).unwrap();
+        let mut builder = faker.data_builder(10).unwrap();
         for _ in 0..10 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         assert_eq!(array.len(), 10);
         assert_eq!(array.null_count(), 0);
         assert_eq!(array.data_type(), &DataType::Timestamp(TimeUnit::Microsecond, None));
@@ -276,11 +249,11 @@ mod test {
     #[test]
     fn test_timestamp_datetime_sequence_faker() {
         let mut faker = TimestampSequenceFaker::new(TimestampUnit::Micros, TimestampType::Datetime, 0, 10, 5);
-        faker.init(20).unwrap();
+        let mut builder = faker.data_builder(20).unwrap();
         for _ in 0..20 {
-            faker.gene_value().unwrap();
+            faker.gene_value(&mut builder).unwrap();
         }
-        let array = faker.finish().unwrap();
+        let array = builder.finish().unwrap();
         let arr = array.as_primitive::<TimestampMicrosecondType>();
         println!("{:?}", arr);
         println!("{:?}", arr.values());

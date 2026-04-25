@@ -1,7 +1,3 @@
-use std::sync::Arc;
-
-use arrow_array::ArrayRef;
-use arrow_array::builder::{ArrayBuilder, StringBuilder};
 use arrow_schema::DataType;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -55,7 +51,6 @@ pub struct OptionStringFaker {
     options: Vec<Option<String>>,
     random: bool,
     index: usize,
-    builder: StringBuilder,
 }
 
 impl OptionStringFaker {
@@ -67,7 +62,6 @@ impl OptionStringFaker {
             options,
             random,
             index: 0,
-            builder: StringBuilder::with_capacity(0, 0),
         })
     }
 }
@@ -77,7 +71,7 @@ impl Faker for OptionStringFaker {
         DataType::Utf8
     }
 
-    fn init(&mut self, capacity: usize) -> anyhow::Result<()> {
+    fn init(&mut self) -> anyhow::Result<()> {
         self.index = 0;
         Ok(())
     }
@@ -199,11 +193,11 @@ mod tests {
             vec![Some("a".into()), Some("b".into()), None],
             false,
         ).unwrap();
-        f.init(7).unwrap();
+        let mut builder = f.data_builder(7).unwrap();
         for _ in 0..7 {
-            f.gene_value().unwrap();
+            f.gene_value(&mut builder).unwrap();
         }
-        let a = f.finish().unwrap();
+        let a = builder.finish().unwrap();
         let v = a.as_string::<i32>();
         assert_eq!(v.value(0), "a");
         assert_eq!(v.value(1), "b");
@@ -214,11 +208,11 @@ mod tests {
     #[test]
     fn chars_string_fixed_len() {
         let mut f = CharsStringFaker::new(vec!['x', 'y'], 4).unwrap();
-        f.init(10).unwrap();
+        let mut builder = f.data_builder(10).unwrap();
         for _ in 0..10 {
-            f.gene_value().unwrap();
+            f.gene_value(&mut builder).unwrap();
         }
-        let arr = f.finish().unwrap();
+        let arr = builder.finish().unwrap();
         let v = arr.as_string::<i32>();
         for i in 0..v.len() {
             let s = v.value(i);
@@ -230,11 +224,11 @@ mod tests {
     #[test]
     fn regex_string_digits() {
         let mut f = RegexStringFaker::new(r"\d{3}-\d{2}").unwrap();
-        f.init(5).unwrap();
+        let mut builder = f.data_builder(5).unwrap();
         for _ in 0..5 {
-            f.gene_value().unwrap();
+            f.gene_value(&mut builder).unwrap();
         }
-        let arr = f.finish().unwrap();
+        let arr = builder.finish().unwrap();
         let v = arr.as_string::<i32>();
         for i in 0..5 {
             let s = v.value(i);

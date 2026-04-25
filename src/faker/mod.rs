@@ -3,6 +3,7 @@ mod string;
 mod complex;
 mod timestamp;
 mod internet;
+mod expr;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -10,7 +11,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use arrow::array::NullBufferBuilder;
-use arrow_array::{ArrayRef, RecordBatch};
+use arrow::buffer::{Buffer, OffsetBuffer};
+use arrow_array::{Array, ArrayRef, ListArray, RecordBatch, StructArray};
 use arrow_array::builder::{ArrayBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder, TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder};
 use arrow_schema::{DataType, Field, Fields, Schema, TimeUnit};
 use pyo3::exceptions::PyRuntimeError;
@@ -24,7 +26,8 @@ pub use number::*;
 pub use string::*;
 pub use complex::*;
 
-enum DataBuilder {
+pub enum DataBuilder {
+    Null,
     Int32(Int32Builder),
     Int64(Int64Builder),
     Float32(Float32Builder),
@@ -51,6 +54,7 @@ enum DataBuilder {
 impl DataBuilder {
     fn append_default_value(&mut self) {
         match self {
+            DataBuilder::Null => (),
             DataBuilder::Int32(builder) => builder.append_value(0),
             DataBuilder::Int64(builder) => builder.append_value(0),
             DataBuilder::Float32(builder) => builder.append_value(0.0),
@@ -76,6 +80,7 @@ impl DataBuilder {
 
     fn append_null(&mut self) {
         match self {
+            DataBuilder::Null => (),
             DataBuilder::Int32(builder) => builder.append_null(),
             DataBuilder::Int64(builder) => builder.append_null(),
             DataBuilder::Float32(builder) => builder.append_null(),
@@ -101,6 +106,7 @@ impl DataBuilder {
 
     fn len(&self) -> usize {
         match self {
+            DataBuilder::Null => 0,
             DataBuilder::Int32(builder) => builder.len(),
             DataBuilder::Int64(builder) => builder.len(),
             DataBuilder::Float32(builder) => builder.len(),
@@ -115,10 +121,43 @@ impl DataBuilder {
             DataBuilder::Struct { fields, field_builders, null_buffer_builder, } => null_buffer_builder.len(),
         }
     }
+
+    fn finish(self) -> Result<ArrayRef> {
+        let array: ArrayRef = match self {
+            DataBuilder::Null => return Err(anyhow::anyhow!("Null")),
+            DataBuilder::Int32(mut builder) => Arc::new(builder.finish()),
+            DataBuilder::Int64(mut builder) => Arc::new(builder.finish()),
+            DataBuilder::Float32(mut builder) => Arc::new(builder.finish()),
+            DataBuilder::Float64(mut builder) => Arc::new(builder.finish()),
+            DataBuilder::String(mut builder) => Arc::new(builder.finish()),
+            DataBuilder::Boolean(mut builder) => Arc::new(builder.finish()),
+            DataBuilder::TimestampSeconds(mut builder) => Arc::new(builder.finish()),
+            DataBuilder::TimestampMillis(mut builder) => Arc::new(builder.finish()),
+            DataBuilder::TimestampMicros(mut builder) => Arc::new(builder.finish()),
+            DataBuilder::TimestampNanos(mut builder) => Arc::new(builder.finish()),
+            DataBuilder::List { item_type, item_builder, mut offsets_builder, mut null_buffer_builder, } => {
+                let offsets = Buffer::from_vec(std::mem::take(&mut offsets_builder));
+                // Safety: Safe by construction
+                let offsets = unsafe { OffsetBuffer::new_unchecked(offsets.into()) };
+                Arc::new(ListArray::new(
+                    Arc::new(Field::new_list_field(item_type, true)),
+                    offsets,
+                    item_builder.finish()?,
+                    null_buffer_builder.finish(),
+                ))
+            },
+            DataBuilder::Struct { fields, field_builders, mut null_buffer_builder, } => {
+                let arrays = field_builders.into_iter().map(|f| f.finish()).collect::<Result<Vec<_>>>()?;
+                Arc::new(StructArray::try_new(fields, arrays, null_buffer_builder.finish())?)
+            },
+        };
+        Ok(array)
+    }
 }
 
-fn make_data_builder(data_type: &DataType, capacity: usize) -> Result<DataBuilder> {
+fn make_data_builder(data_type: DataType, capacity: usize) -> Result<DataBuilder> {
     match data_type {
+        DataType::Null => Ok(DataBuilder::Int32(Int32Builder::with_capacity(capacity))),
         DataType::Int32 => Ok(DataBuilder::Int32(Int32Builder::with_capacity(capacity))),
         DataType::Int64 => Ok(DataBuilder::Int64(Int64Builder::with_capacity(capacity))),
         DataType::Float32 => Ok(DataBuilder::Float32(Float32Builder::with_capacity(capacity))),
@@ -133,15 +172,14 @@ fn make_data_builder(data_type: &DataType, capacity: usize) -> Result<DataBuilde
         },
         DataType::List(f) => {
             let item_type = f.data_type().clone();
-            let item_builder = Box::new(make_data_builder(f.data_type(), capacity)?);
+            let item_builder = Box::new(make_data_builder(f.data_type().clone(), capacity)?);
             let mut offsets_builder = Vec::with_capacity(capacity + 1);
             let null_buffer_builder = NullBufferBuilder::new(capacity);
             offsets_builder.push(0);
             Ok(DataBuilder::List {item_type, item_builder, offsets_builder, null_buffer_builder, })
         },
         DataType::Struct(fields) => {
-            let fields = fields.clone();
-            let field_builders  = fields.iter().map(|f| make_data_builder(f.data_type(), capacity)).collect::<Result<Vec<_>>>()?;
+            let field_builders  = fields.iter().map(|f| make_data_builder(f.data_type().clone(), capacity)).collect::<Result<Vec<_>>>()?;
             let null_buffer_builder = NullBufferBuilder::new(capacity);
             Ok(DataBuilder::Struct {fields, field_builders, null_buffer_builder})
         },
@@ -234,23 +272,15 @@ fn builder_float64_append_value(builder: &mut DataBuilder, value: f64) {
 pub trait Faker: Debug {
     fn data_type(&self) -> DataType;
 
-    fn init(&mut self, capacity: usize) -> Result<()> {
+    fn data_builder(&self, capacity: usize) -> Result<DataBuilder> {
+        make_data_builder(self.data_type(), capacity)
+    }
+
+    fn init(&mut self) -> Result<()> {
         Ok(())
     }
 
     fn gene_value(&mut self, builder: &mut DataBuilder) -> Result<()>;
-
-    fn gene_null(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        0
-    }
-
-    fn finish(&mut self) -> Result<ArrayRef> {
-        Err(anyhow::anyhow!("not support finish"))
-    }
 
     fn should_flatten_fields(&self) -> bool {
         false
@@ -260,7 +290,7 @@ pub trait Faker: Debug {
         false
     }
 
-    fn compute(&self, fields: & HashMap<&str, ArrayRef>) -> Result<ArrayRef> {
+    fn compute(&self, columns: & HashMap<&str, ArrayRef>, row_count: usize) -> Result<ArrayRef> {
         Err(anyhow::anyhow!("not support compute"))
     }
 }
@@ -322,28 +352,57 @@ pub fn fake_record_batch_from_field_configs(
     configs: &[FieldFakerConfig],
     num_rows: usize,
 ) -> Result<RecordBatch> {
-    let names: Vec<String> = configs.iter().map(|c| c.name.clone()).collect();
-    let mut fakers: Vec<Box<dyn Faker>> = configs
-        .iter()
-        .map(|c| c.config.build())
-        .collect::<Result<Vec<_>>>()?;
-
-    for f in &mut fakers {
-        f.init(num_rows)?;
+    let mut faker_builders = Vec::with_capacity(configs.len());
+    let  mut field_size = 0;
+    for c in configs {
+        let faker = c.config.build()?;
+        let builder = faker.data_builder(num_rows)?;
+        if faker.should_flatten_fields() {
+            if let DataType::Struct(f) = faker.data_type() {
+                field_size += f.size();
+            } else {
+                return Err(anyhow::anyhow!("not struct but flatten fields"));
+            }
+        }
+        field_size += 1;
+        faker_builders.push((& c.name, faker.is_compute_faker(), faker, builder));
     }
+
     for _ in 0..num_rows {
-        for f in &mut fakers {
-            f.gene_value()?;
+        for (_, compute, faker, builder) in &mut faker_builders {
+            if !*compute {
+                faker.gene_value(builder)?;
+            }
         }
     }
 
-    let arrays: Vec<ArrayRef> = fakers.iter_mut().map(|f| f.finish()).collect::<Result<_>>()?;
+    let mut fields: Vec<Field> = Vec::with_capacity(field_size);
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(field_size);
+    let mut columns: HashMap<&str, ArrayRef> = HashMap::new();
 
-    let fields: Vec<Field> = names
-        .into_iter()
-        .zip(arrays.iter())
-        .map(|(name, arr)| Field::new(name, arr.data_type().clone(), true))
-        .collect();
+    for (name, compute, faker, builder) in faker_builders {
+        let array = if compute {
+            faker.compute(&columns, num_rows)?
+        } else {
+            builder.finish()?
+        };
+        columns.insert(name.as_ref(), array.clone());
+        if faker.should_flatten_fields() {
+            if let Some(s) = array.as_any().downcast_ref::<StructArray>() {
+                for x in s.fields() {
+                    fields.push(x.as_ref().clone());
+                }
+                for c in s.columns() {
+                    arrays.push(c.clone());
+                }
+            } else {
+                return Err(anyhow::anyhow!("not a StructArray"));
+            }
+        } else {
+            fields.push(Field::new(name, array.data_type().clone(), true));
+            arrays.push(array);
+        }
+    }
 
     let schema = Arc::new(Schema::new(fields));
     Ok(RecordBatch::try_new(schema, arrays)?)
@@ -401,7 +460,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod record_batch_from_json_tests {
     use arrow_array::cast::AsArray;
     use arrow_array::types::Int32Type;
-
+    use crate::json_writer::serialize_record_batches_json_bytes;
     use super::*;
 
     #[test]
@@ -441,4 +500,32 @@ mod record_batch_from_json_tests {
         let col = batch.column(0).as_primitive::<Int32Type>();
         assert_eq!(col.values(), &[10, 20, 10, 20]);
     }
+
+    #[test]
+    fn build_batch_from_json_complex() {
+        let json = r#"[
+          { "name": "id", "type": "int", "min": 1, "max": 1000000, "random": false },
+          { "name": "ts", "type": "timestamp", "timestamp_type": "datetime" },
+          { "name": "cn1", "type": "int", "min": 1, "max": 1000, "null_rate": 0.2 },
+          { "name": "cn2", "type": "int", "min": 1, "max": 1000, "null_rate": 0.2},
+          { "name": "cn3", "type": "eval", "expression": "cn1 + cn2"},
+          { "name": "union", "type": "union", "random": true, "union_fields": [
+            { "weight": 4, "fields":[
+              { "name": "cate_id", "type": "int", "min": 1, "max": 100 },
+              { "name": "cate", "type": "string", "options": [ "a", "b", null, "c", "d" ] }
+            ]},
+            { "weight": 2, "fields": [
+              { "name": "text", "type": "string", "regex": "12[a-z]{2}" }
+            ] }
+          ] }
+        ]"#;
+
+        let configs: Vec<FieldFakerConfig> = serde_json::from_str(json).expect("json");
+        let batch = fake_record_batch_from_field_configs(&configs, 10).expect("batch");
+        let batches = [batch];
+        let json_bytes = serialize_record_batches_json_bytes(&batches, true, None).unwrap();
+        println!("{}", String::from_utf8(json_bytes).unwrap());
+        println!("{:?}", batches[0]);
+    }
+
 }
