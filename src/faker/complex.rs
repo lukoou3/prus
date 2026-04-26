@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use arrow_array::ArrayRef;
 use arrow_schema::{DataType, Field, Fields};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use crate::faker::{DataBuilder, Faker, FakerConfig};
 use crate::faker::expr::{parse_expr, Expr};
+
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EvalConfig {
@@ -24,6 +25,39 @@ pub struct FieldFakerConfig {
     pub name: String,
     #[serde(flatten)]
     pub config: Box<dyn FakerConfig>,
+}
+
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StructFakerConfig {
+    fields: Vec<FieldFakerConfig>,
+}
+
+#[typetag::serde(name = "struct")]
+impl FakerConfig for StructFakerConfig {
+    fn build(&self) -> anyhow::Result<Box<dyn Faker>> {
+        if self.fields.iter().map(|f| f.name.as_str()).collect::<HashSet<_>>().len() != self.fields.len() {
+            return Err(anyhow::anyhow!("struct faker fields name must be unique"));
+        }
+        
+        let mut field_fakers = Vec::with_capacity(self.fields.len());
+        let mut fields = Vec::with_capacity(self.fields.len());
+
+        for field_config in &self.fields {
+            let faker = field_config.config.build()?;
+            if faker.is_compute_faker() {
+                return Err(anyhow::anyhow!("struct faker not support computed field: {}", field_config.name));
+            }
+            if faker.should_flatten_fields() {
+                return Err(anyhow::anyhow!("struct faker not support flatten field: {}", field_config.name));
+            }
+            fields.push(Field::new(field_config.name.clone(), faker.data_type(), true));
+            field_fakers.push(faker);
+        }
+
+        let faker = StructFaker::new(Fields::from(fields), field_fakers)?;
+        Ok(Box::new(faker))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -48,6 +82,9 @@ impl FakerConfig for UnionFakerConfig {
         for union_fields_config in &self.union_fields {
             let weight = union_fields_config.weight;
             let field_configs = &union_fields_config.fields;
+            if field_configs.iter().map(|f| f.name.as_str()).collect::<HashSet<_>>().len() != field_configs.len() {
+                return Err(anyhow::anyhow!("union faker fields name must be unique"));
+            }
             let mut field_fakers = HashMap::new();
             for field_config in field_configs {
                 let faker = field_config.config.build()?;
@@ -128,6 +165,63 @@ impl Faker for ArrayFaker {
                 Ok(())
             },
             _ => Err(anyhow::anyhow!("unexpected builder type"))
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct StructFaker {
+    fields: Fields,
+    field_fakers: Vec<Box<dyn Faker>>,
+}
+
+impl StructFaker {
+    pub fn new(fields: Fields, field_fakers: Vec<Box<dyn Faker>>) -> anyhow::Result<Self> {
+        if fields.len() != field_fakers.len() {
+            return Err(anyhow::anyhow!("fields and field_fakers length mismatch"));
+        }
+        
+        // Validate that field types match faker data types
+        for (field, faker) in fields.iter().zip(field_fakers.iter()) {
+            if field.data_type() != &faker.data_type() {
+                return Err(anyhow::anyhow!(
+                    "field {} type mismatch: expected {:?}, got {:?}",
+                    field.name(),
+                    field.data_type(),
+                    faker.data_type()
+                ));
+            }
+        }
+        
+        Ok(StructFaker {
+            fields,
+            field_fakers,
+        })
+    }
+}
+
+impl Faker for StructFaker {
+    fn data_type(&self) -> DataType {
+        DataType::Struct(self.fields.clone())
+    }
+
+    fn init(&mut self) -> anyhow::Result<()> {
+        for faker in self.field_fakers.iter_mut() {
+            faker.init()?;
+        }
+        Ok(())
+    }
+
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
+        match builder {
+            DataBuilder::Struct { fields: _, field_builders, null_buffer_builder } => {
+                for (faker, field_builder) in self.field_fakers.iter_mut().zip(field_builders.iter_mut()) {
+                    faker.gene_value(field_builder)?;
+                }
+                null_buffer_builder.append(true);
+                Ok(())
+            },
+            _ => Err(anyhow::anyhow!("unexpected builder type, expected Struct builder"))
         }
     }
 }
@@ -324,7 +418,7 @@ mod tests {
     use arrow_array::cast::AsArray;
     use arrow_schema::Field;
 
-    use crate::faker::{OptionIntFaker, RangeIntFaker};
+    use crate::faker::{CharsStringFaker, OptionIntFaker, RangeFloatFaker, RangeIntFaker};
     use super::*;
 
     #[test]
@@ -400,7 +494,7 @@ mod tests {
         let fields_faker1 = FieldsFaker::new(
             vec![
                 (0, Some(Box::new(RangeIntFaker::new(1, 10, false).unwrap()))),
-                (1, Some(Box::new(crate::faker::CharsStringFaker::new(vec!['a', 'b', 'c'], 5).unwrap()))),
+                (1, Some(Box::new(CharsStringFaker::new(vec!['a', 'b', 'c'], 5).unwrap()))),
             ],
             1,
         );
@@ -408,7 +502,7 @@ mod tests {
         let fields_faker2 = FieldsFaker::new(
             vec![
                 (0, Some(Box::new(RangeIntFaker::new(100, 200, false).unwrap()))),
-                (1, Some(Box::new(crate::faker::CharsStringFaker::new(vec!['1', '2', '3'], 5).unwrap()))),
+                (1, Some(Box::new(CharsStringFaker::new(vec!['1', '2', '3'], 5).unwrap()))),
             ],
             2,
         );
@@ -425,6 +519,68 @@ mod tests {
         let array = builder.finish().unwrap();
         assert_eq!(array.len(), 30);
         println!("UnionFaker random mode result: {:?}", array);
+    }
+
+    #[test]
+    fn test_struct_faker() {
+        // 创建StructFaker
+        let fields = Fields::from(vec![
+            Field::new("id", DataType::Int32, true),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("score", DataType::Float32, true),
+        ]);
+        
+        let field_fakers: Vec<Box<dyn Faker>> = vec![
+            Box::new(RangeIntFaker::new(1, 100, false).unwrap()),
+            Box::new(CharsStringFaker::new(vec!['a', 'b', 'c'], 5).unwrap()),
+            Box::new(RangeFloatFaker::new(0.0, 100.0).unwrap()),
+        ];
+        
+        let mut struct_faker = StructFaker::new(fields, field_fakers).unwrap();
+        let mut builder = struct_faker.data_builder(10).unwrap();
+        
+        // 生成数据
+        for _ in 0..10 {
+            struct_faker.gene_value(&mut builder).unwrap();
+        }
+        
+        let array = builder.finish().unwrap();
+        assert_eq!(array.len(), 10);
+        
+        // 验证是StructArray
+        let struct_array = array.as_any().downcast_ref::<arrow_array::StructArray>().unwrap();
+        assert_eq!(struct_array.fields().len(), 3);
+        
+        println!("StructFaker result: {:?}", array);
+    }
+
+    #[test]
+    fn test_struct_faker_config() {
+        // 通过JSON配置创建StructFaker
+        let json = r#"{
+            "type": "struct",
+            "fields": [
+                {"name": "id", "type": "int", "min": 1, "max": 100, "random": false},
+                {"name": "name", "type": "string", "options": ["Alice", "Bob", "Charlie"]},
+                {"name": "age", "type": "int", "min": 18, "max": 60}
+            ]
+        }"#;
+        
+        let config: StructFakerConfig = serde_json::from_str(json).unwrap();
+        let mut faker = config.build().unwrap();
+        let mut builder = faker.data_builder(5).unwrap();
+        
+        for _ in 0..5 {
+            faker.gene_value(&mut builder).unwrap();
+        }
+        
+        let array = builder.finish().unwrap();
+        assert_eq!(array.len(), 5);
+        
+        let struct_array = array.as_any().downcast_ref::<arrow_array::StructArray>().unwrap();
+        assert_eq!(struct_array.fields().len(), 3);
+        
+        println!("StructFaker from config: {:?}", array);
     }
 
 }

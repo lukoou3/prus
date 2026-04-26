@@ -595,6 +595,8 @@ pip install maturin
 maturin develop
 # Optional: Kafka client (requires CMake / librdkafka toolchain)
 maturin develop --features kafka
+maturin develop --release
+maturin develop --release --features kafka
 ```
 
 Run tests:

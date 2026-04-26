@@ -5,7 +5,8 @@ mod timestamp;
 mod internet;
 mod expr;
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -353,15 +354,25 @@ pub fn fake_record_batch_from_field_configs(
     num_rows: usize,
 ) -> Result<RecordBatch> {
     let mut faker_builders = Vec::with_capacity(configs.len());
-    let  mut field_size = 0;
+    let mut field_size = 0;
+    let mut names: HashSet<Cow<'_, str>> = HashSet::new();
     for c in configs {
         let faker = c.config.build()?;
         let builder = faker.data_builder(num_rows)?;
         if faker.should_flatten_fields() {
-            if let DataType::Struct(f) = faker.data_type() {
-                field_size += f.size();
+            if let DataType::Struct(fs) = faker.data_type() {
+                field_size += fs.size();
+                for f in fs.iter() {
+                    if !names.insert(Cow::Owned(f.name().clone())) {
+                        return Err(anyhow::anyhow!("{} is not unique", f.name()));
+                    }
+                }
             } else {
                 return Err(anyhow::anyhow!("not struct but flatten fields"));
+            }
+        } else {
+            if !names.insert(Cow::Borrowed(&c.name)) {
+                return Err(anyhow::anyhow!("{} is not unique", c.name));
             }
         }
         field_size += 1;
@@ -506,6 +517,11 @@ mod record_batch_from_json_tests {
         let json = r#"[
           { "name": "id", "type": "int", "min": 1, "max": 1000000, "random": false },
           { "name": "ts", "type": "timestamp", "timestamp_type": "datetime" },
+          { "name": "tags", "type": "int", "min": 0, "max": 10, "array": true, "array_len_max": 3},
+          { "name": "location", "type": "struct", "fields": [
+              {"name": "province", "type": "string", "regex": "province[0-9]"},
+              {"name": "city", "type": "string", "regex": "city[0-9]"}
+            ]},
           { "name": "cn1", "type": "int", "min": 1, "max": 1000, "null_rate": 0.2 },
           { "name": "cn2", "type": "int", "min": 1, "max": 1000, "null_rate": 0.2},
           { "name": "cn3", "type": "eval", "expression": "cn1 + cn2"},
