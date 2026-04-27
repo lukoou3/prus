@@ -4,6 +4,7 @@ mod complex;
 mod timestamp;
 mod internet;
 mod expr;
+mod binary;
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -14,7 +15,7 @@ use anyhow::Result;
 use arrow::array::NullBufferBuilder;
 use arrow::buffer::{Buffer, OffsetBuffer};
 use arrow_array::{Array, ArrayRef, ListArray, RecordBatch, StructArray};
-use arrow_array::builder::{ArrayBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder, TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder};
+use arrow_array::builder::{ArrayBuilder, BinaryBuilder, BinaryLikeArrayBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int32Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder, TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder};
 use arrow_schema::{DataType, Field, Fields, Schema, TimeUnit};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -39,6 +40,7 @@ pub enum DataBuilder {
     TimestampMillis(TimestampMillisecondBuilder),
     TimestampMicros(TimestampMicrosecondBuilder),
     TimestampNanos(TimestampNanosecondBuilder),
+    Binary(BinaryBuilder),
     List {
         item_type: DataType,
         item_builder: Box<DataBuilder>,
@@ -66,6 +68,7 @@ impl DataBuilder {
             DataBuilder::TimestampMillis(builder) => builder.append_value(0),
             DataBuilder::TimestampMicros(builder) => builder.append_value(0),
             DataBuilder::TimestampNanos(builder) => builder.append_value(0),
+            DataBuilder::Binary(builder) => builder.append_value(""),
             DataBuilder::List { item_type, item_builder, offsets_builder, null_buffer_builder, } => {
                 offsets_builder.push(item_builder.len() as i32);
                 null_buffer_builder.append(true);
@@ -92,6 +95,7 @@ impl DataBuilder {
             DataBuilder::TimestampMillis(builder) => builder.append_null(),
             DataBuilder::TimestampMicros(builder) => builder.append_null(),
             DataBuilder::TimestampNanos(builder) => builder.append_null(),
+            DataBuilder::Binary(builder) => builder.append_null(),
             DataBuilder::List { item_type, item_builder, offsets_builder, null_buffer_builder, } => {
                 offsets_builder.push(item_builder.len() as i32);
                 null_buffer_builder.append(false);
@@ -118,6 +122,7 @@ impl DataBuilder {
             DataBuilder::TimestampMillis(builder) => builder.len(),
             DataBuilder::TimestampMicros(builder) => builder.len(),
             DataBuilder::TimestampNanos(builder) => builder.len(),
+            DataBuilder::Binary(builder) => builder.len(),
             DataBuilder::List { item_type, item_builder, offsets_builder, null_buffer_builder, } => null_buffer_builder.len(),
             DataBuilder::Struct { fields, field_builders, null_buffer_builder, } => null_buffer_builder.len(),
         }
@@ -136,6 +141,7 @@ impl DataBuilder {
             DataBuilder::TimestampMillis(mut builder) => Arc::new(builder.finish()),
             DataBuilder::TimestampMicros(mut builder) => Arc::new(builder.finish()),
             DataBuilder::TimestampNanos(mut builder) => Arc::new(builder.finish()),
+            DataBuilder::Binary(mut builder) => Arc::new(builder.finish()),
             DataBuilder::List { item_type, item_builder, mut offsets_builder, mut null_buffer_builder, } => {
                 let offsets = Buffer::from_vec(std::mem::take(&mut offsets_builder));
                 // Safety: Safe by construction
@@ -163,8 +169,9 @@ fn make_data_builder(data_type: DataType, capacity: usize) -> Result<DataBuilder
         DataType::Int64 => Ok(DataBuilder::Int64(Int64Builder::with_capacity(capacity))),
         DataType::Float32 => Ok(DataBuilder::Float32(Float32Builder::with_capacity(capacity))),
         DataType::Float64 => Ok(DataBuilder::Float64(Float64Builder::with_capacity(capacity))),
-        DataType::Utf8 => Ok(DataBuilder::String(StringBuilder::with_capacity(capacity, capacity))),
+        DataType::Utf8 => Ok(DataBuilder::String(StringBuilder::with_capacity(capacity, capacity * 2))),
         DataType::Boolean => Ok(DataBuilder::Boolean(BooleanBuilder::with_capacity(capacity))),
+        DataType::Binary => Ok(DataBuilder::Binary(BinaryBuilder::with_capacity(capacity, capacity * 2))),
         DataType::Timestamp(unit, _) => match unit {
             TimeUnit::Second => Ok(DataBuilder::TimestampSeconds(TimestampSecondBuilder::with_capacity(capacity))),
             TimeUnit::Millisecond => Ok(DataBuilder::TimestampMillis(TimestampMillisecondBuilder::with_capacity(capacity))),
@@ -232,6 +239,15 @@ fn builder_float64_append_value(builder: &mut DataBuilder, value: f64) {
         unreachable!()
     }
  }
+
+#[inline]
+fn builder_binary_append_value(builder: &mut DataBuilder, value: &[u8]) {
+    if let DataBuilder::Binary(builder) = builder {
+        builder.append_value(value);
+    } else {
+        unreachable!()
+    }
+}
 
  #[inline]
  fn builder_boolean_append_value(builder: &mut DataBuilder, value: bool) {
