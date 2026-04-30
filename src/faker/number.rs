@@ -1,7 +1,11 @@
 use arrow_schema::DataType;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use super::{builder_float32_append_value, builder_float64_append_value, builder_int32_append_value, builder_int64_append_value, wrap_faker_necessary, DataBuilder, Faker, FakerConfig, WrapConfig};
+use super::{
+    builder_boolean_append_value, builder_float32_append_value, builder_float64_append_value,
+    builder_int32_append_value, builder_int64_append_value, wrap_faker_necessary, DataBuilder,
+    Faker, FakerConfig, WrapConfig,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct IntFakerConfig {
@@ -113,6 +117,43 @@ impl FakerConfig for DoubleFakerConfig {
     }
 }
 
+/// Boolean field faker.
+///
+/// - If `options` is non-empty: pick from the list (each entry may be `null` for Arrow nulls),
+///   either randomly or in order depending on `random` (same semantics as `int`).
+/// - If `options` is empty: `true_rate` is the probability of `true` when `random` is `true`
+///   (Bernoulli); when `random` is `false`, cycles `false, true, false, true, ...`.
+#[derive(Debug, Serialize, Deserialize)]
+struct BooleanFakerConfig {
+    #[serde(default)]
+    options: Vec<Option<bool>>,
+    #[serde(default = "default_random")]
+    random: bool,
+    /// Used when `options` is empty; clamped to \[0, 1\].
+    #[serde(default = "default_true_rate")]
+    true_rate: f32,
+    #[serde(flatten, default)]
+    wrap_config: WrapConfig,
+}
+
+#[typetag::serde(name = "boolean")]
+impl FakerConfig for BooleanFakerConfig {
+    fn build(&self) -> anyhow::Result<Box<dyn Faker>> {
+        if !self.options.is_empty() {
+            let faker = Box::new(OptionBoolFaker::new(self.options.clone(), self.random)?);
+            Ok(wrap_faker_necessary(faker, &self.wrap_config))
+        } else {
+            let true_rate = if self.true_rate.is_finite() {
+                self.true_rate.clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+            let faker = Box::new(BernoulliBoolFaker::new(true_rate, self.random));
+            Ok(wrap_faker_necessary(faker, &self.wrap_config))
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SequenceFakerConfig {
     #[serde(default)]
@@ -144,6 +185,50 @@ fn default_sequence_step() -> i64 {
 
 fn default_sequence_batch() -> u32 {
     1
+}
+
+fn default_true_rate() -> f32 {
+    0.5
+}
+
+#[derive(Debug)]
+pub struct BernoulliBoolFaker {
+    true_rate: f32,
+    random: bool,
+    seq_index: usize,
+}
+
+impl BernoulliBoolFaker {
+    pub fn new(true_rate: f32, random: bool) -> Self {
+        Self {
+            true_rate,
+            random,
+            seq_index: 0,
+        }
+    }
+}
+
+impl Faker for BernoulliBoolFaker {
+    fn data_type(&self) -> DataType {
+        DataType::Boolean
+    }
+
+    fn init(&mut self) -> anyhow::Result<()> {
+        self.seq_index = 0;
+        Ok(())
+    }
+
+    fn gene_value(&mut self, builder: &mut DataBuilder) -> anyhow::Result<()> {
+        let v = if self.random {
+            rand::rng().random_range(0.0f32..1.0f32) < self.true_rate
+        } else {
+            let v = (self.seq_index % 2) == 1;
+            self.seq_index += 1;
+            v
+        };
+        builder_boolean_append_value(builder, v);
+        Ok(())
+    }
 }
 
 /// Picks from a fixed list of optional values (null = explicit `None` in the list).
@@ -307,6 +392,7 @@ impl_option_faker!(OptionIntFaker, i32, DataType::Int32, Int32Builder, builder_i
 impl_option_faker!(OptionBigintFaker, i64, DataType::Int64, Int64Builder, builder_int64_append_value);
 impl_option_faker!(OptionFloatFaker, f32, DataType::Float32, Float32Builder, builder_float32_append_value);
 impl_option_faker!(OptionDoubleFaker, f64, DataType::Float64, Float64Builder, builder_float64_append_value);
+impl_option_faker!(OptionBoolFaker, bool, DataType::Boolean, BooleanBuilder, builder_boolean_append_value);
 
 impl_range_integer_faker!(RangeIntFaker, i32, DataType::Int32, Int32Builder, builder_int32_append_value);
 impl_range_integer_faker!(RangeBigintFaker, i64, DataType::Int64, Int64Builder, builder_int64_append_value);
@@ -481,5 +567,46 @@ mod test {
         let array = builder.finish().unwrap();
         let arr = array.as_primitive::<Int64Type>();
         assert_eq!(arr.values(), &[0, 0, 0, 1, 1, 1, 2, 2, 2, 3]);
+    }
+
+    #[test]
+    fn bernoulli_bool_sequential_alternates() {
+        let mut faker = BernoulliBoolFaker::new(0.9, false);
+        let mut builder = faker.data_builder(6).unwrap();
+        for _ in 0..6 {
+            faker.gene_value(&mut builder).unwrap();
+        }
+        let array = builder.finish().unwrap();
+        let arr = array.as_boolean();
+        assert_eq!(
+            (0..6).map(|i| arr.value(i)).collect::<Vec<_>>(),
+            vec![false, true, false, true, false, true]
+        );
+    }
+
+    #[test]
+    fn bernoulli_bool_all_true() {
+        let mut faker = BernoulliBoolFaker::new(1.0, true);
+        let mut builder = faker.data_builder(20).unwrap();
+        for _ in 0..20 {
+            faker.gene_value(&mut builder).unwrap();
+        }
+        let array = builder.finish().unwrap();
+        let arr = array.as_boolean();
+        assert!((0..20).all(|i| arr.value(i)));
+    }
+
+    #[test]
+    fn option_bool_sequential_with_null() {
+        let mut faker = OptionBoolFaker::new(vec![Some(true), None, Some(false)], false).unwrap();
+        let mut builder = faker.data_builder(7).unwrap();
+        for _ in 0..7 {
+            faker.gene_value(&mut builder).unwrap();
+        }
+        let array = builder.finish().unwrap();
+        assert_eq!(array.null_count(), 2);
+        let arr = array.as_boolean();
+        assert!(arr.value(0));
+        assert!(!arr.value(2));
     }
 }
