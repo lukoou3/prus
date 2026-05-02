@@ -130,7 +130,7 @@ fn py_dict_to_properties(d: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String)>
 }
 
 fn py_schema_to_pairs(schema: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String)>> {
-    let list: &Bound<'_, pyo3::types::PyList>  = schema.cast()?;
+    let list: &Bound<'_, pyo3::types::PyList> = schema.cast()?;
     let mut out = Vec::with_capacity(list.len());
     for item in list.iter() {
         let tup = item.downcast::<pyo3::types::PyTuple>()?;
@@ -192,28 +192,29 @@ fn read_kafka_to_arrow_impl(
         .fetch_metadata(Some(topic), Duration::from_secs(10))
         .map_err(|e| format!("Failed to fetch metadata: {e}"))?;
 
-
     let partitions = if let Some(t) = metadata.topics().iter().find(|t| t.name() == topic) {
         t.partitions()
     } else {
-        return Err(format!("not find topic:{}", topic))
+        return Err(format!("not find topic:{}", topic));
     };
     if partitions.is_empty() {
         return Err(format!("Topic {} has no partitions", topic));
     }
 
-
-
     if let Some(ts) = start_timestamp_ms {
         let mut tpl = TopicPartitionList::new();
         for partition in partitions {
-            tpl.add_partition_offset(topic, partition.id(), rdkafka::Offset::Offset(ts)).map_err(|e| format!("Failed to set partition offset: {e}"))?;
+            tpl.add_partition_offset(topic, partition.id(), rdkafka::Offset::Offset(ts))
+                .map_err(|e| format!("Failed to set partition offset: {e}"))?;
         }
-        let offsets = consumer.offsets_for_times(tpl, Duration::from_secs(10)).map_err(|e| format!("Failed to get offsets for times: {e}"))?;
+        let offsets = consumer
+            .offsets_for_times(tpl, Duration::from_secs(10))
+            .map_err(|e| format!("Failed to get offsets for times: {e}"))?;
         let mut tpl = TopicPartitionList::new();
         for elem in offsets.elements() {
             if let Some(offset) = elem.offset().to_raw() {
-                tpl.add_partition_offset(topic, elem.partition(), rdkafka::Offset::Offset(offset)).map_err(|e| format!("Failed to set partition offset: {e}"))?;
+                tpl.add_partition_offset(topic, elem.partition(), rdkafka::Offset::Offset(offset))
+                    .map_err(|e| format!("Failed to set partition offset: {e}"))?;
             } else {
                 tpl.add_partition(topic, elem.partition());
             }
@@ -241,7 +242,7 @@ fn read_kafka_to_arrow_impl(
             let mut partition_ids: Vec<i32> = Vec::new();
             let mut offsets: Vec<i64> = Vec::new();
             let mut timestamps: Vec<Option<i64>> = Vec::new();
-            
+
             while messages.len() < max_msgs && Instant::now() < deadline {
                 match consumer.poll(POLL_TIMEOUT) {
                     None => {
@@ -249,7 +250,7 @@ fn read_kafka_to_arrow_impl(
                         if empty_cnt > 50 {
                             break;
                         }
-                    },
+                    }
                     Some(Ok(m)) => {
                         empty_cnt = 0;
                         if let Some(payload) = m.payload() {
@@ -264,8 +265,14 @@ fn read_kafka_to_arrow_impl(
                     Some(Err(e)) => return Err(format!("Kafka poll error: {e}")),
                 }
             }
-            build_raw_batches(messages, include_metadata, partition_ids, offsets, timestamps)
-        },
+            build_raw_batches(
+                messages,
+                include_metadata,
+                partition_ids,
+                offsets,
+                timestamps,
+            )
+        }
         "json" => {
             let s = schema
                 .ok_or("json mode requires schema (PyArrow schema or list of (name, type_str))")?
@@ -276,19 +283,19 @@ fn read_kafka_to_arrow_impl(
             let mut timestamps: Vec<Option<i64>> = Vec::new();
             let mut msgs = 0;
             while msgs < max_msgs && Instant::now() < deadline {
-                msgs += 1;
                 match consumer.poll(POLL_TIMEOUT) {
                     None => {
                         empty_cnt += 1;
                         if empty_cnt > 50 {
                             break;
                         }
-                    },
+                    }
                     Some(Ok(m)) => {
                         empty_cnt = 0;
                         if let Some(payload) = m.payload() {
                             bytes.extend_from_slice(payload);
                             bytes.push(b'\n');
+                            msgs += 1;
                             if include_metadata {
                                 partition_ids.push(m.partition());
                                 offsets.push(m.offset());
@@ -299,7 +306,14 @@ fn read_kafka_to_arrow_impl(
                     Some(Err(e)) => return Err(format!("Kafka poll error: {e}")),
                 }
             }
-            build_json_batches_with_schema(bytes, s, include_metadata, partition_ids, offsets, timestamps)
+            build_json_batches_with_schema(
+                bytes,
+                s,
+                include_metadata,
+                partition_ids,
+                offsets,
+                timestamps,
+            )
         }
         _ => Err(format!("mode must be 'raw' or 'json', got '{mode}'")),
     }
@@ -321,7 +335,7 @@ fn build_raw_batches(
     timestamps: Vec<Option<i64>>,
 ) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
     let mut fields = vec![Field::new("value", DataType::Utf8, true)];
-    
+
     if include_metadata {
         fields.extend(vec![
             Field::new("kafka_partition_id", DataType::Int32, false),
@@ -329,17 +343,17 @@ fn build_raw_batches(
             Field::new("kafka_timestamp", DataType::Int64, true),
         ]);
     }
-    
+
     let schema = Arc::new(Schema::new(fields));
-    
-    let mut arrays: Vec<ArrayRef> = vec![Arc::new(StringArray::from(messages)) ];
-    
+
+    let mut arrays: Vec<ArrayRef> = vec![Arc::new(StringArray::from(messages))];
+
     if include_metadata {
         arrays.push(Arc::new(Int32Array::from(partition_ids)));
         arrays.push(Arc::new(Int64Array::from(offsets)));
         arrays.push(Arc::new(Int64Array::from(timestamps)));
     }
-    
+
     let batch = RecordBatch::try_new(schema.clone(), arrays)
         .map_err(|e| format!("RecordBatch build failed: {e}"))?;
     Ok((schema, vec![batch]))
@@ -363,12 +377,13 @@ fn build_json_batches_with_schema(
         schema.clone()
     };
     if bytes.is_empty() {
-        return  Ok((new_schema, vec![]));
+        return Ok((new_schema, vec![]));
     }
 
     let cursor = Cursor::new(&bytes);
     let mut reader = ReaderBuilder::new(schema.clone())
-        .with_coerce_primitive(true).with_batch_size(8192)
+        .with_coerce_primitive(true)
+        .with_batch_size(8192)
         .build(BufReader::new(cursor))
         .map_err(|e| format!("JSON reader build failed: {e}"))?;
 
@@ -382,27 +397,38 @@ fn build_json_batches_with_schema(
 
         if include_metadata {
             if start_row == 0 && end_row == partition_ids.len() {
-                batch = add_metadata_to_batch(batch, new_schema.clone(), partition_ids, offsets, timestamps)
-                    .map_err(|e| format!("Failed to add metadata: {e}"))?;
+                batch = add_metadata_to_batch(
+                    batch,
+                    new_schema.clone(),
+                    partition_ids,
+                    offsets,
+                    timestamps,
+                )
+                .map_err(|e| format!("Failed to add metadata: {e}"))?;
                 batches.push(batch);
                 break;
             } else {
-                batch = add_metadata_to_batch(batch, new_schema.clone(), partition_ids[start_row.. end_row].to_vec(), offsets[start_row.. end_row].to_vec(), timestamps[start_row.. end_row].to_vec())
-                    .map_err(|e| format!("Failed to add metadata: {e}"))?;
+                batch = add_metadata_to_batch(
+                    batch,
+                    new_schema.clone(),
+                    partition_ids[start_row..end_row].to_vec(),
+                    offsets[start_row..end_row].to_vec(),
+                    timestamps[start_row..end_row].to_vec(),
+                )
+                .map_err(|e| format!("Failed to add metadata: {e}"))?;
             }
         }
-        
+
         batches.push(batch);
     }
 
-    
     Ok((new_schema, batches))
 }
 
 fn add_metadata_to_batch(
     batch: RecordBatch,
     new_schema: Arc<Schema>,
-    partition_ids: Vec<i32> ,
+    partition_ids: Vec<i32>,
     offsets: Vec<i64>,
     timestamps: Vec<Option<i64>>,
 ) -> Result<RecordBatch, String> {
@@ -412,7 +438,6 @@ fn add_metadata_to_batch(
     arrays.push(Arc::new(Int64Array::from(offsets)));
     arrays.push(Arc::new(Int64Array::from(timestamps)));
 
-    
     RecordBatch::try_new(new_schema, arrays)
         .map_err(|e| format!("Failed to create batch with metadata: {e}"))
 }
@@ -477,7 +502,7 @@ mod tests {
             None,
             None,
             None,
-            false
+            false,
         )
         .unwrap();
         println!("schema: {:?}", schema);
@@ -497,9 +522,9 @@ mod tests {
             None,
             None,
             Some(1773632690000),
-            true
+            true,
         )
-            .unwrap();
+        .unwrap();
         println!("schema: {:?}", schema);
         for batch in batches {
             println!("batch: {:?}", batch);
@@ -521,7 +546,7 @@ mod tests {
             Some(&in_schema),
             None,
             None,
-            false
+            false,
         )
         .unwrap();
         println!("schema: {:?}", schema);
@@ -553,13 +578,12 @@ mod tests {
             Some(&in_schema),
             None, //Some(&properties),
             Some(1773632690000),
-            true
+            true,
         )
-            .unwrap();
+        .unwrap();
         println!("schema: {:?}", schema);
         for batch in batches {
             println!("batch: {:?}", batch);
         }
     }
-
 }
